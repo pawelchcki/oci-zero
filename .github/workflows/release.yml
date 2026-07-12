@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+      # The first release bootstraps the trusted-publisher configuration.
+      - "!v0.0.1"
 
 permissions:
   contents: read
