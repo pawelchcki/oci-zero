@@ -7,9 +7,10 @@
 `oci-zero` aims to provide bounded-memory building blocks for accessing and
 unpacking content from remote Open Container Initiative (OCI) registries.
 
-> **Status:** This is an early project scaffold. Version 0.1.0 establishes the
-> project constraints and roadmap but does not yet implement an OCI client or
-> expose a functional public API.
+> [!WARNING]
+> **Work in progress:** `oci-zero` is not functional yet. Version 0.0.1 only
+> establishes the project constraints and roadmap; it does not implement an OCI
+> client or expose a usable public API.
 
 ## Goals
 
