@@ -20,6 +20,14 @@ jobs:
       - run: cargo clippy --workspace --exclude oci-zero-no-std-extract --all-targets --all-features -- -D warnings
       - run: cargo clippy --release -p oci-zero-no-std-extract -- -D warnings
       - run: cargo test --workspace --all-features
+      - name: Public OCI artifact metadata smoke tests
+        run: cargo run --release --example download_metadata -- --smoke
+      - name: no_std MbedTLS streamed extraction smoke test
+        run: |
+          cargo build --release -p oci-zero-no-std-extract
+          target/release/oci-zero-no-std-extract \
+            'https://install.datadoghq.com/v2/agent-package/blobs/sha256:bc219703080f03ad836d51bf7f72cc3ced34f5ba440a49f450d6a5dea98ceff4' \
+            application_monitoring.yaml.example > /dev/null
       - name: Official zstd decodeCorpus conformance
         run: |
           curl -fsSLo /tmp/zstd-1.5.7.tar.gz https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz

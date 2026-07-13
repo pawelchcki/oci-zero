@@ -60,9 +60,47 @@ cargo run --example download_metadata
 
 The example defaults to
 `oci://install.datadoghq.com/agent-package@sha256:7ab3a71476f068c21399250e66a2b1ab366437489510ee12c2119bba75afcde9`.
-Pass a different public `oci://` reference as its first argument to inspect it
-instead. The example is a host-side prototype and does not form part of the
-allocation-free core API.
+Pass one or more public `oci://` references as arguments to inspect them
+instead. The example handles both indexes and artifact manifests, including
+anonymous Bearer-token authentication, and verifies the sizes and SHA-256
+digests of every manifest and config document it downloads. It is a host-side
+prototype and does not form part of the allocation-free core API.
+
+Run the digest-pinned public fixture set used by CI:
+
+```console
+cargo run --release --example download_metadata -- --smoke
+```
+
+The fixtures deliberately cover different public artifact repositories and
+registry behavior:
+
+- A multi-platform Datadog Agent package index on `install.datadoghq.com`, with
+  custom `tar+zstd` layer media types and no authentication challenge.
+- The Prometheus Helm chart on GHCR, including the Helm config, chart, and
+  provenance media types behind anonymous Bearer authentication.
+- The Bitnami Harbor Helm chart on Docker Hub, exercising a second Bearer token
+  service and an annotated chart layer.
+- A CRI-O bundle and its attached Sigstore and SPDX artifacts on GHCR,
+  validating OCI 1.1 `artifactType` and `subject`. GHCR currently returns 404
+  for the Referrers API on this repository, so the smoke test also exercises
+  the distribution-spec referrers-tag fallback and tolerates legacy descriptor
+  metadata after checking the authoritative manifests.
+- The ORAS CLI's multi-platform OCI container image, including OCI image
+  configs, layers, and attestation manifests.
+- Kubernetes's `pause` image from `registry.k8s.io`, covering cross-registry
+  redirects and Docker Schema 2 manifest-list, manifest, config, compressed
+  layer, and Windows uncompressed-layer media types.
+
+All fixture references use manifest digests rather than mutable tags. The
+metadata smoke test intentionally skips artifact layers; the streamed layer
+smoke test below covers that path.
+
+Together these exercise the registry-facing parts of the OCI Image Spec, its
+artifact guidance, OCI Distribution Spec 1.1, and Docker Schema 2. The OCI
+Runtime Spec describes the runtime `config.json` and process lifecycle rather
+than registry objects, so it is deliberately outside this metadata smoke test;
+it needs a separate runtime adapter or container-runtime conformance test.
 
 Stream and decode a current Datadog `tar+zstd` config layer, verifying both its
 compressed and decompressed SHA-256 digests without buffering either stream:
@@ -115,6 +153,9 @@ it verifies the known Datadog layer's compressed and decompressed sizes and
 digests, trusts only the embedded DigiCert Global Root G2, resolves DNS through
 `8.8.8.8`, and creates one TLS session per process. The hosted adapter requires
 Rust 1.91; the allocation-free core crate remains compatible with Rust 1.75.
+CI builds and runs this binary against the pinned HTTPS blob, so the network,
+certificate verification, fixed TLS arena, decoder, digest checks, tar parser,
+and extraction path are exercised together.
 
 ## License
 
