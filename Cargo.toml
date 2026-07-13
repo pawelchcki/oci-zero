@@ -10,7 +10,27 @@ readme = "README.md"
 keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
 
+[workspace]
+members = ["no-std-extract", "zstd-zero"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [features]
 default = []
 
 [dependencies]
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = { version = "0.10", default-features = false }
+ureq = { version = "=2.9.7", default-features = false, features = ["tls"] }
+# Keep ureq's transitive dependencies compatible with the crate's Rust 1.75 MSRV.
+url = "=2.4.1"
+zeroize = "=1.8.1"
+zstd-zero = { path = "zstd-zero" }
