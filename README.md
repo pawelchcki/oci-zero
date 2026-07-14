@@ -49,24 +49,21 @@ standard library. The current reqwless adapter requires Rust 1.91; enabling
 
 ## Examples
 
-Download the index, platform manifests, and config blobs for a public Datadog
-Agent package without downloading its package layers:
+Download and verify a digest-pinned public OCI index, then print a short
+summary:
 
 ```console
 cargo run --example download_metadata
 ```
 
-The example defaults to
+The example uses
 `oci://install.datadoghq.com/agent-package@sha256:7ab3a71476f068c21399250e66a2b1ab366437489510ee12c2119bba75afcde9`.
-Pass one or more public `oci://` references as arguments to inspect them
-instead. The example handles both indexes and artifact manifests, including
-anonymous Bearer-token authentication, and verifies the sizes and SHA-256
-digests of every manifest and config document it downloads.
 
-Run the digest-pinned public fixture set used by CI:
+Run the detailed digest-pinned public registry fixture set used by CI:
 
 ```console
-cargo run --release --example download_metadata -- --smoke
+cargo test --release --test metadata_smoke \
+  inspects_public_registry_fixtures -- --ignored --nocapture
 ```
 
 The fixtures deliberately cover different public artifact repositories and

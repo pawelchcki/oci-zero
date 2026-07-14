@@ -9,8 +9,10 @@ use core::slice;
 use embedded_io_async::Read;
 use oci_zero::compression::zstd::{DecoderBuffers, MAX_BLOCK_SIZE};
 use oci_zero::digest::Digest;
-use oci_zero::layer::{Decoder, LayerError, VerifiedDecoder};
-use oci_zero::tar::EntryExtractor;
+use oci_zero::layer::{
+    Decoder, EntryLayerError, LayerError, VerifiedDecoder, VerifiedEntryExtractor,
+};
+use oci_zero::tar::ExtractError;
 use rustix::fd::BorrowedFd;
 use rustix::io::Errno;
 
@@ -142,14 +144,13 @@ pub(crate) async fn extract_reader<R: Read>(reader: &mut R, target: &[u8]) -> Re
         block: &mut buffers.block,
         literals: &mut buffers.literals,
     });
-    let mut decoder = VerifiedDecoder::new(
+    let decoder = VerifiedDecoder::new(
         decoder,
         Digest::from_bytes(COMPRESSED_SHA256),
         COMPRESSED_SIZE,
         Digest::from_bytes(DECOMPRESSED_SHA256),
     );
-    let mut extractor = EntryExtractor::new(target);
-    let mut decompressed_size = 0u64;
+    let mut extractor = VerifiedEntryExtractor::new(decoder, target);
     let mut input = [0u8; INPUT_SIZE];
 
     // SAFETY: This single-threaded process inherits valid stdout and never
@@ -161,44 +162,29 @@ pub(crate) async fn extract_reader<R: Read>(reader: &mut R, target: &[u8]) -> Re
         if length == 0 {
             break;
         }
-        decoder
-            .push(&input[..length], |bytes| {
-                consume_output(&mut extractor, stdout, bytes, &mut decompressed_size)
-            })
-            .map_err(layer_error)?;
+        extractor
+            .push(&input[..length], |bytes| write_all(stdout, bytes))
+            .map_err(entry_error)?;
     }
-    decoder
-        .finish(|bytes| consume_output(&mut extractor, stdout, bytes, &mut decompressed_size))
-        .map_err(layer_error)?;
-    extractor.finish().map_err(|_| Failure::Archive)?;
+    extractor
+        .finish(|bytes| write_all(stdout, bytes))
+        .map_err(entry_error)?;
 
-    if decompressed_size != DECOMPRESSED_SIZE {
+    if extractor.decompressed_size() != DECOMPRESSED_SIZE {
         return Err(Failure::Integrity);
     }
     Ok(())
 }
 
-fn layer_error(error: LayerError<Failure>) -> Failure {
+fn entry_error(error: EntryLayerError<()>) -> Failure {
     match error {
-        LayerError::Format(_) => Failure::Decode,
-        LayerError::Integrity(_) => Failure::Integrity,
-        LayerError::Output(error) => error,
+        EntryLayerError::Layer(LayerError::Format(_)) => Failure::Decode,
+        EntryLayerError::Layer(LayerError::Integrity(_)) => Failure::Integrity,
+        EntryLayerError::Layer(LayerError::Output(ExtractError::Output(()))) => Failure::Output,
+        EntryLayerError::Layer(LayerError::Output(_)) | EntryLayerError::Finish(_) => {
+            Failure::Archive
+        }
     }
-}
-
-fn consume_output(
-    extractor: &mut EntryExtractor<'_>,
-    stdout: BorrowedFd<'_>,
-    bytes: &[u8],
-    decompressed_size: &mut u64,
-) -> Result<(), Failure> {
-    *decompressed_size += bytes.len() as u64;
-    extractor
-        .push(bytes, |contents| write_all(stdout, contents))
-        .map_err(|error| match error {
-            oci_zero::tar::ExtractError::Output(()) => Failure::Output,
-            _ => Failure::Archive,
-        })
 }
 
 fn write_all(fd: BorrowedFd<'_>, mut bytes: &[u8]) -> Result<(), ()> {

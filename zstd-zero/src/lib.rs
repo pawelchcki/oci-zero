@@ -2,6 +2,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate std;
+
 mod bitstream;
 mod error;
 mod fse;
@@ -73,6 +76,26 @@ impl DecodeStep<'_> {
             | Self::FrameStarted { consumed, .. }
             | Self::Output { consumed, .. }
             | Self::FrameFinished { consumed, .. } => *consumed,
+        }
+    }
+}
+
+/// A failure while driving a [`Decoder`] through its callback API.
+#[derive(Debug, Eq, PartialEq)]
+pub enum StreamError<E> {
+    Decode(DecodeError),
+    Output(E),
+    DecoderStalled,
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for StreamError<E> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Decode(error) => write!(formatter, "Zstandard decode failed: {error}"),
+            Self::Output(error) => write!(formatter, "Zstandard output failed: {error}"),
+            Self::DecoderStalled => {
+                formatter.write_str("Zstandard decoder stopped making progress")
+            }
         }
     }
 }
@@ -221,6 +244,75 @@ impl<'a> Decoder<'a> {
                 DecodeStep::FrameFinished { consumed, kind }
             }
         })
+    }
+
+    /// Consumes an input fragment and sends decoded bytes to `output`.
+    ///
+    /// This is the convenient callback-driven counterpart to [`decode`](Self::decode).
+    /// Frame events are handled internally while output errors remain distinct
+    /// from compressed-stream errors.
+    pub fn push<E>(
+        &mut self,
+        mut input: &[u8],
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), StreamError<E>> {
+        let mut idle_steps = 0;
+        while !input.is_empty() {
+            let step = self.decode(input).map_err(StreamError::Decode)?;
+            let consumed = step.consumed();
+            if consumed > input.len() {
+                return Err(StreamError::DecoderStalled);
+            }
+            let needs_input = matches!(step, DecodeStep::NeedInput { .. });
+            let produced = match step {
+                DecodeStep::Output { bytes, .. } => {
+                    if bytes.is_empty() {
+                        false
+                    } else {
+                        output(bytes).map_err(StreamError::Output)?;
+                        true
+                    }
+                }
+                _ => false,
+            };
+            input = &input[consumed..];
+            if needs_input && !input.is_empty() {
+                return Err(StreamError::DecoderStalled);
+            }
+            if consumed != 0 || produced {
+                idle_steps = 0;
+            } else {
+                idle_steps += 1;
+                if idle_steps > 16 {
+                    return Err(StreamError::DecoderStalled);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drains buffered output and validates the end of the stream.
+    pub fn finish_with<E>(
+        &mut self,
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), StreamError<E>> {
+        let mut idle_steps = 0;
+        loop {
+            match self.decode(&[]).map_err(StreamError::Decode)? {
+                DecodeStep::NeedInput { .. } => break,
+                DecodeStep::Output { bytes, .. } if !bytes.is_empty() => {
+                    output(bytes).map_err(StreamError::Output)?;
+                    idle_steps = 0;
+                }
+                _ => {
+                    idle_steps += 1;
+                    if idle_steps > 16 {
+                        return Err(StreamError::DecoderStalled);
+                    }
+                }
+            }
+        }
+        self.finish().map_err(StreamError::Decode)
     }
 
     pub fn finish(&self) -> Result<(), DecodeError> {
@@ -1039,6 +1131,7 @@ const OF_DEFAULT: [i16; 29] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
 
     #[test]
     fn parses_sampled_datadog_header() {
@@ -1090,6 +1183,37 @@ mod tests {
         }
         assert_eq!(&output, b"hello");
         decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn streams_fragmented_output_through_callback() {
+        let frame = [
+            0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x05, 0x29, 0, 0, b'h', b'e', b'l', b'l', b'o',
+        ];
+        let mut history = [0u8; 5];
+        let mut block = [0u8; 5];
+        let mut literals = [0u8; 5];
+        let mut decoder = Decoder::new(DecoderBuffers {
+            history: &mut history,
+            block: &mut block,
+            literals: &mut literals,
+        });
+        let mut output = Vec::new();
+        for fragment in frame.chunks(2) {
+            decoder
+                .push(fragment, |bytes| {
+                    output.extend_from_slice(bytes);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+        }
+        decoder
+            .finish_with(|bytes| {
+                output.extend_from_slice(bytes);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(output, b"hello");
     }
 
     #[test]

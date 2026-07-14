@@ -4,7 +4,10 @@ use core::fmt;
 
 use crate::{
     digest::{Digest, Verifier, VerifyError},
-    tar::{Archive, ArchiveError, ArchiveFinishError, TransactionalLayerSink},
+    tar::{
+        Archive, ArchiveError, ArchiveFinishError, EntryExtractor, ExtractError, FinishError,
+        TransactionalLayerSink,
+    },
 };
 
 pub const OCI_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
@@ -150,6 +153,93 @@ pub struct VerifiedDecoder<'a> {
     decoder: Decoder<'a>,
     compressed: Verifier,
     uncompressed: Verifier,
+}
+
+/// Verifies and decodes a layer while extracting one regular tar entry.
+pub struct VerifiedEntryExtractor<'decoder, 'target> {
+    decoder: VerifiedDecoder<'decoder>,
+    extractor: EntryExtractor<'target>,
+    extracted_size: u64,
+}
+
+impl<'decoder, 'target> VerifiedEntryExtractor<'decoder, 'target> {
+    pub const fn new(decoder: VerifiedDecoder<'decoder>, target: &'target [u8]) -> Self {
+        Self {
+            decoder,
+            extractor: EntryExtractor::new(target),
+            extracted_size: 0,
+        }
+    }
+
+    pub fn push<E>(
+        &mut self,
+        input: &[u8],
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), EntryLayerError<E>> {
+        let extractor = &mut self.extractor;
+        let extracted_size = &mut self.extracted_size;
+        self.decoder
+            .push(input, |decoded| {
+                extract_output(extractor, extracted_size, decoded, &mut output)
+            })
+            .map_err(EntryLayerError::Layer)
+    }
+
+    pub fn finish<E>(
+        &mut self,
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), EntryLayerError<E>> {
+        let extractor = &mut self.extractor;
+        let extracted_size = &mut self.extracted_size;
+        self.decoder
+            .finish(|decoded| extract_output(extractor, extracted_size, decoded, &mut output))
+            .map_err(EntryLayerError::Layer)?;
+        self.extractor.finish().map_err(EntryLayerError::Finish)
+    }
+
+    pub const fn compressed_size(&self) -> u64 {
+        self.decoder.compressed_size()
+    }
+
+    pub const fn decompressed_size(&self) -> u64 {
+        self.decoder.decompressed_size()
+    }
+
+    pub const fn extracted_size(&self) -> u64 {
+        self.extracted_size
+    }
+
+    pub const fn found(&self) -> bool {
+        self.extractor.found()
+    }
+}
+
+fn extract_output<E>(
+    extractor: &mut EntryExtractor<'_>,
+    extracted_size: &mut u64,
+    decoded: &[u8],
+    output: &mut impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), ExtractError<E>> {
+    extractor.push(decoded, |contents| {
+        output(contents)?;
+        *extracted_size += contents.len() as u64;
+        Ok(())
+    })
+}
+
+#[derive(Debug)]
+pub enum EntryLayerError<E> {
+    Layer(LayerError<ExtractError<E>>),
+    Finish(FinishError),
+}
+
+impl<E: fmt::Display> fmt::Display for EntryLayerError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layer(error) => write!(formatter, "entry layer failed: {error}"),
+            Self::Finish(error) => write!(formatter, "entry extraction failed: {error}"),
+        }
+    }
 }
 
 /// Transactionally decodes, verifies, parses, and applies one OCI layer.
@@ -308,6 +398,14 @@ impl<'a> VerifiedDecoder<'a> {
         Ok(())
     }
 
+    pub const fn compressed_size(&self) -> u64 {
+        self.compressed.actual_size()
+    }
+
+    pub const fn decompressed_size(&self) -> u64 {
+        self.uncompressed.actual_size()
+    }
+
     pub fn finish<E>(
         &mut self,
         mut output: impl FnMut(&[u8]) -> Result<(), E>,
@@ -378,7 +476,7 @@ impl fmt::Display for LayerFormatError {
 mod tests {
     use sha2::{Digest as _, Sha256};
 
-    use super::{Decoder, LayerApplier, VerifiedDecoder};
+    use super::{Decoder, LayerApplier, VerifiedDecoder, VerifiedEntryExtractor};
     use crate::{
         digest::Digest,
         tar::{Archive, ArchiveBuffers, Entry, LayerEventSink, TransactionalLayerSink},
@@ -447,6 +545,49 @@ mod tests {
             .unwrap();
         decoder.finish(|_| Ok::<_, ()>(())).unwrap();
         assert_eq!(&output, bytes);
+    }
+
+    #[test]
+    fn verifies_and_extracts_one_entry() {
+        let mut tar = [0u8; 2048];
+        tar[..6].copy_from_slice(b"wanted");
+        write_octal(&mut tar[100..108], 0o644);
+        write_octal(&mut tar[124..136], 5);
+        tar[148..156].fill(b' ');
+        tar[156] = b'0';
+        let checksum = tar[..512].iter().map(|byte| u64::from(*byte)).sum();
+        write_octal(&mut tar[148..156], checksum);
+        tar[512..517].copy_from_slice(b"hello");
+
+        let digest = Digest::from_bytes(Sha256::digest(tar).into());
+        let decoder = VerifiedDecoder::new(Decoder::tar(), digest, tar.len() as u64, digest);
+        let mut extractor = VerifiedEntryExtractor::new(decoder, b"wanted");
+        let mut output = [0u8; 5];
+        let mut length = 0;
+        for fragment in tar.chunks(7) {
+            extractor
+                .push(fragment, |bytes| {
+                    output[length..length + bytes.len()].copy_from_slice(bytes);
+                    length += bytes.len();
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+        }
+        extractor.finish(|_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(&output, b"hello");
+        assert_eq!(extractor.decompressed_size(), tar.len() as u64);
+        assert_eq!(extractor.extracted_size(), 5);
+    }
+
+    fn write_octal(field: &mut [u8], value: u64) {
+        field.fill(b'0');
+        let digits = field.len() - 1;
+        field[digits] = 0;
+        let mut value = value;
+        for byte in field[..digits].iter_mut().rev() {
+            *byte = b'0' + (value & 7) as u8;
+            value >>= 3;
+        }
     }
 
     #[test]

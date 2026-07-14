@@ -21,7 +21,7 @@ jobs:
       - run: cargo clippy --release -p oci-zero-no-std-extract -- -D warnings
       - run: cargo test --workspace --exclude oci-zero-no-std-extract --all-features
       - name: Public OCI artifact metadata smoke tests
-        run: cargo run --release --example download_metadata -- --smoke
+        run: cargo test --release --test metadata_smoke inspects_public_registry_fixtures -- --ignored --nocapture
       - name: no_std MbedTLS streamed extraction smoke test
         run: |
           cargo build --release -p oci-zero-no-std-extract
