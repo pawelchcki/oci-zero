@@ -36,6 +36,8 @@ The default feature set is empty:
 - `zstd` integrates the separately published `zstd-zero` decoder.
 - `reqwless` adds streaming HTTP over `embedded-io` connections.
 - `tls` implies `reqwless` and adds the caller-configured MbedTLS connector.
+- `docker-credentials` adds a host-side provider for Docker CLI
+  `DOCKER_AUTH_CONFIG`, `credHelpers`, `credsStore`, and inline `auths`.
 
 The core APIs use borrowed values, caller-owned buffers, visitors, and streaming
 source/sink traits. They do not require a filesystem, executor, HTTP client, or
@@ -44,8 +46,10 @@ TLS implementation.
 ## Compatibility
 
 The core, `gzip`, and `zstd` features support Rust 1.75 and targets without the
-standard library. The current reqwless adapter requires Rust 1.91; enabling
-`tls` retains that feature-specific requirement.
+standard library. `docker-credentials` deliberately requires the standard
+library so it can read local files and execute credential helpers. The current
+reqwless adapter requires Rust 1.91; enabling `tls` retains that
+feature-specific requirement.
 
 ## Examples
 
@@ -53,11 +57,27 @@ Download and verify a digest-pinned public OCI index, then print a short
 summary:
 
 ```console
-cargo run --example download_metadata
+cargo run --features docker-credentials --example download_metadata
 ```
 
 The example uses
 `oci://install.datadoghq.com/agent-package@sha256:7ab3a71476f068c21399250e66a2b1ab366437489510ee12c2119bba75afcde9`.
+Pass another reference to inspect a private registry using the credentials from
+`$DOCKER_CONFIG/config.json` or `~/.docker/config.json`:
+
+```console
+docker login ghcr.io
+cargo run --features docker-credentials --example download_metadata -- \
+  oci://ghcr.io/OWNER/PRIVATE_IMAGE:TAG
+```
+
+No password or token is placed in the command line. The provider follows
+Docker CLI precedence: a matching `DOCKER_AUTH_CONFIG` entry, then a
+registry-specific `credHelpers` entry, then `credsStore`, and finally inline
+`auths`. Helpers such as `docker-credential-desktop`,
+`docker-credential-osxkeychain`, and registry-specific helpers are discovered
+through `PATH` and invoked directly without a shell. Authentication errors do
+not include credential values.
 
 Run the detailed digest-pinned public registry fixture set used by CI:
 

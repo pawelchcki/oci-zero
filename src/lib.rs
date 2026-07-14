@@ -3,13 +3,15 @@
 #![forbid(unsafe_code)]
 #![allow(async_fn_in_trait)]
 
-#[cfg(test)]
+#[cfg(any(test, feature = "docker-credentials"))]
 extern crate std;
 
 pub mod tar;
 
 pub mod compression;
 pub mod digest;
+#[cfg(feature = "docker-credentials")]
+pub mod docker_credentials;
 mod json;
 pub mod layer;
 pub mod metadata;
