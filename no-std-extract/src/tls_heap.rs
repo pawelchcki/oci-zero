@@ -20,6 +20,18 @@ static ARENA: Arena = Arena {
     used: UnsafeCell::new(0),
 };
 
+#[cfg(feature = "bench-metrics")]
+pub fn used() -> usize {
+    // The hosted binary is single-threaded and calls this only after the TLS
+    // session has been closed and dropped.
+    unsafe { *ARENA.used.get() }
+}
+
+#[cfg(feature = "bench-metrics")]
+pub const fn capacity() -> usize {
+    TLS_ARENA_SIZE
+}
+
 struct SingleThreadedCriticalSection;
 
 critical_section::set_impl!(SingleThreadedCriticalSection);

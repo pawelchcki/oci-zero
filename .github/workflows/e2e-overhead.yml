@@ -1,0 +1,37 @@
+name: E2E overhead
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: Digest-pinned workload
+        required: true
+        default: ghcr-64m-w64k
+        type: choice
+        options:
+          - datadog-10m-w32m
+          - ghcr-64m-w64k
+          - ghcr-256m-w256k
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Linux overhead measurement
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install profilers
+        run: sudo apt-get update && sudo apt-get install --yes time valgrind
+      - name: Run end-to-end harness
+        run: bench/e2e-overhead.sh --fixture '${{ inputs.fixture }}'
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-overhead-${{ inputs.fixture }}-${{ runner.arch }}-callgrind
+          path: target/e2e-overhead/
+          if-no-files-found: error

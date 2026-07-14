@@ -151,6 +151,24 @@ CI builds and runs this binary against the pinned HTTPS blob, so the network,
 certificate verification, fixed TLS arena, decoder, digest checks, tar parser,
 and extraction path are exercised together.
 
+## End-to-end overhead
+
+The Linux profiling harness runs that same pinned download and records native
+heap use, peak live allocation demand, peak RSS and stack, the fixed TLS arena
+high-water, decoder static storage, CPU and wall time, binary size, and
+user-space instructions. The 3.65 MB transfer decodes to a verified 10.88 MB
+layer:
+
+```console
+bench/e2e-overhead.sh
+bench/e2e-overhead.sh --fixture ghcr-64m-w64k
+bench/e2e-overhead.sh --fixture ghcr-256m-w256k
+```
+
+See [bench/README.md](bench/README.md) for profiler requirements, metric
+semantics, the optional hardware instruction counter, and the manual GitHub
+Actions workflow available to macOS users.
+
 ## License
 
 Licensed under either of

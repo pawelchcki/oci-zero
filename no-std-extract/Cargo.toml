@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
+[features]
+bench-metrics = []
+
 [[bin]]
 name = "oci-zero-no-std-extract"
 path = "src/main.rs"
