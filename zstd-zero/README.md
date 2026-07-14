@@ -44,9 +44,20 @@ The crate is published separately so applications can use the decoder without
 depending on OCI registry functionality.
 
 The test suite compares against libzstd across compression levels and input
-fragmentation patterns. CI also builds zstd 1.5.7's official `decodecorpus`
-generator and checks 256 deterministic no-dictionary frames. The same check can
-be run locally with:
+fragmentation patterns. The differential suite generates 256 deterministic
+frames across payload families, boundary sizes, compression levels and
+strategies, frame and block options, exact declared history windows, and
+streaming fragmentation, then decodes each with both libzstd and `zstd-zero`.
+It also cross-checks a concatenated stream containing Zstandard and skippable
+frames. Increase or reduce the generated case count with
+`ZSTD_ZERO_CROSSCHECK_CASES`:
+
+```console
+ZSTD_ZERO_CROSSCHECK_CASES=1024 cargo test -p zstd-zero --test differential
+```
+
+CI also builds zstd 1.5.7's official `decodecorpus` generator and checks 256
+deterministic no-dictionary frames. The same check can be run locally with:
 
 ```console
 DECODECORPUS=/path/to/decodecorpus cargo test -p zstd-zero \
