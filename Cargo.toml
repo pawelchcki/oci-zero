@@ -1,6 +1,6 @@
 [package]
 name = "oci-zero"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A no-std, allocation-free streaming core for OCI registries"
@@ -11,7 +11,7 @@ keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
 
 [workspace]
-members = ["no-std-extract", "zstd-zero"]
+members = ["gzip-zero", "no-std-extract", "zstd-zero"]
 resolver = "2"
 
 [profile.dev]
@@ -22,15 +22,32 @@ panic = "abort"
 
 [features]
 default = []
+gzip = ["dep:gzip-zero"]
+reqwless = [
+    "dep:embedded-io",
+    "dep:embedded-io-async",
+    "dep:embedded-nal-async",
+    "dep:reqwless",
+]
+tls = ["reqwless", "dep:mbedtls-rs"]
+zstd = ["dep:zstd-zero"]
 
 [dependencies]
+embedded-io = { version = "0.7", default-features = false, optional = true }
+embedded-io-async = { version = "0.7", default-features = false, optional = true }
+embedded-nal-async = { version = "0.9", optional = true }
+gzip-zero = { version = "0.1.0", path = "gzip-zero", optional = true }
+mbedtls-rs = { version = "0.1", default-features = false, features = ["tls"], optional = true }
+reqwless = { version = "0.14", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false }
+zstd-zero = { version = "0.1.0", path = "zstd-zero", optional = true }
 
 [dev-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = { version = "0.10", default-features = false }
 ureq = { version = "=2.9.7", default-features = false, features = ["tls"] }
 # Keep ureq's transitive dependencies compatible with the crate's Rust 1.75 MSRV.
 url = "=2.4.1"
 zeroize = "=1.8.1"
-zstd-zero = { path = "zstd-zero" }
+
+[[example]]
+name = "extract_file"
+required-features = ["zstd"]

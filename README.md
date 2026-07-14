@@ -8,46 +8,44 @@
 unpacking content from remote Open Container Initiative (OCI) registries.
 
 > [!WARNING]
-> **Work in progress:** Version 0.0.1 does not yet implement an OCI client. Its
-> first usable core primitive is an allocation-free streaming tar entry
-> extractor.
+> **Experimental:** The allocation-free APIs are usable but remain subject to
+> change while the registry and layer conformance suites grow.
 
-## Goals
+## Capabilities
 
 - Remain `no_std` and allocation-free by default.
-- Parse OCI descriptors, manifests, indexes, and registry responses
-  incrementally, using caller-owned buffers and borrowed data.
-- Drive the OCI Distribution protocol through a caller-provided transport,
-  without requiring a particular HTTP client, TLS stack, executor, or runtime.
-- Verify content digests while blobs are streamed from a registry.
-- Unpack image layers incrementally into a caller-provided sink, with bounded
-  memory use and explicit handling for path safety and OCI whiteouts.
-- Define a pluggable metadata store that can operate without a heap or a
-  filesystem.
-- Add optional `alloc` and `std` convenience adapters later without weakening
-  the allocation-free core.
+- Parse references, indexes, manifests, image configs, descriptors, tags,
+  annotations, and referrers as lazy borrowed views over caller buffers.
+- Plan the complete read side of the OCI Distribution protocol, including
+  authentication challenges, redirects, retries, pagination, and referrers
+  fallback.
+- Traverse selected platform manifests through a transport-independent fetcher
+  and callback visitor without retaining descriptor collections.
+- Verify descriptor sizes, compressed SHA-256 digests, and image layer diff IDs
+  while content streams.
+- Parse tar, ustar, per-entry PAX, and GNU long-path records into a
+  transactional layer sink with safe paths and OCI whiteout events.
+- Optionally decode gzip and Zstandard layers or use reqwless and MbedTLS,
+  without adding a Rust allocator.
 
-## Design direction
+## Features
 
-The core APIs will favor borrowed values, fixed-capacity caller-owned buffers,
-visitors, and streaming source/sink traits. Network access, persistent storage,
-and platform integration will be supplied by applications or by optional
-adapter crates and features. The workspace includes the experimental
-`zstd-zero` companion decoder for allocation-free layer decompression.
+The default feature set is empty:
 
-The intended implementation order is:
+- `gzip` integrates the separately published `gzip-zero` decoder.
+- `zstd` integrates the separately published `zstd-zero` decoder.
+- `reqwless` adds streaming HTTP over `embedded-io` connections.
+- `tls` implies `reqwless` and adds the caller-configured MbedTLS connector.
 
-1. Streamed parsing for the OCI metadata needed by registry operations.
-2. Transport-independent registry request and response state machines.
-3. Digest verification and streamed layer unpacking.
-4. A no-allocation metadata-store interface and reference backends.
-5. Optional ergonomic adapters for environments with `alloc` or `std`.
+The core APIs use borrowed values, caller-owned buffers, visitors, and streaming
+source/sink traits. They do not require a filesystem, executor, HTTP client, or
+TLS implementation.
 
 ## Compatibility
 
-The minimum supported Rust version is 1.75. The default feature set is empty,
-and the core crate is expected to compile for targets that do not provide the
-Rust standard library.
+The core, `gzip`, and `zstd` features support Rust 1.75 and targets without the
+standard library. The current reqwless adapter requires Rust 1.91; enabling
+`tls` retains that feature-specific requirement.
 
 ## Examples
 
@@ -63,8 +61,7 @@ The example defaults to
 Pass one or more public `oci://` references as arguments to inspect them
 instead. The example handles both indexes and artifact manifests, including
 anonymous Bearer-token authentication, and verifies the sizes and SHA-256
-digests of every manifest and config document it downloads. It is a host-side
-prototype and does not form part of the allocation-free core API.
+digests of every manifest and config document it downloads.
 
 Run the digest-pinned public fixture set used by CI:
 
@@ -109,15 +106,15 @@ compressed and decompressed SHA-256 digests without buffering either stream:
 cargo run --release -p zstd-zero --example decode_layer
 ```
 
-The experimental decoder lives in the unpublished `zstd-zero` workspace crate.
-It is `no_std`, dependency-free, and allocation-free; this host-side smoke test
+The decoder lives in the separately publishable `zstd-zero` workspace crate. It
+is `no_std`, dependency-free, and allocation-free; this host-side smoke test
 uses heap-backed caller buffers for its 32 MiB history window and two 128 KiB
 scratch areas.
 
 Extract one regular file from that layer while it is downloaded and decoded:
 
 ```console
-cargo run --release --example extract_file -- \
+cargo run --release --features zstd --example extract_file -- \
   application_monitoring.yaml.example > application_monitoring.yaml.example
 ```
 
@@ -143,8 +140,8 @@ The same binary can read an already downloaded blob with
 `oci-zero-no-std-extract datadog-config-layer.tar.zst ENTRY`, or read the blob
 from standard input when the source argument is `-`.
 
-The network path composes reqwless's streaming request/response API with
-`mbedtls-rs`; it does not collect the response body. MbedTLS's internal C
+The network path uses `oci-zero`'s optional reqwless and MbedTLS adapters; it
+does not collect the response body. MbedTLS's internal C
 allocations come from a fixed 4 MiB static bump arena, while the Rust program
 has no global allocator. The Zstandard decoder's 32 MiB history, two 128 KiB
 work areas, 16 KiB input area, and the HTTP/TLS buffers are also bounded and

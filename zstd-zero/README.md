@@ -40,7 +40,8 @@ At end-of-input, call `decode(&[])` until it returns `NeedInput`, then call
 content checksum fails, so callers that need atomic behavior must use a
 transactional sink.
 
-This crate is not published while its conformance suite and API stabilize.
+The crate is published separately so applications can use the decoder without
+depending on OCI registry functionality.
 
 The test suite compares against libzstd across compression levels and input
 fragmentation patterns. CI also builds zstd 1.5.7's official `decodecorpus`

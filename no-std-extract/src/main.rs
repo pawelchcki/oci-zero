@@ -7,11 +7,12 @@ use core::panic::PanicInfo;
 use core::slice;
 
 use embedded_io_async::Read;
+use oci_zero::compression::zstd::{DecoderBuffers, MAX_BLOCK_SIZE};
+use oci_zero::digest::Digest;
+use oci_zero::layer::{Decoder, LayerError, VerifiedDecoder};
 use oci_zero::tar::EntryExtractor;
 use rustix::fd::BorrowedFd;
 use rustix::io::Errno;
-use sha2::{Digest, Sha256};
-use zstd_zero::{DecodeStep, Decoder, DecoderBuffers, MAX_BLOCK_SIZE};
 
 mod platform;
 mod source;
@@ -59,7 +60,6 @@ pub(crate) enum Failure {
     Archive,
     Output,
     Integrity,
-    Network,
     Tls,
     Http,
 }
@@ -73,7 +73,6 @@ impl Failure {
             Self::Archive => 5,
             Self::Output => 6,
             Self::Integrity => 7,
-            Self::Network => 8,
             Self::Tls => 9,
             Self::Http => 10,
         }
@@ -87,7 +86,6 @@ impl Failure {
             Self::Archive => b"invalid tar stream or entry not found\n",
             Self::Output => b"failed to write extracted entry to stdout\n",
             Self::Integrity => b"Datadog layer size or digest mismatch\n",
-            Self::Network => b"network or DNS operation failed\n",
             Self::Tls => b"TLS connection or certificate verification failed\n",
             Self::Http => b"HTTP request or response failed\n",
         }
@@ -139,15 +137,18 @@ pub(crate) async fn extract_reader<R: Read>(reader: &mut R, target: &[u8]) -> Re
     // SAFETY: `main` is called once and `extract` does not expose these
     // references beyond this invocation.
     let buffers = unsafe { &mut *BUFFERS.0.get() };
-    let mut decoder = Decoder::new(DecoderBuffers {
+    let decoder = Decoder::zstd(DecoderBuffers {
         history: &mut buffers.history,
         block: &mut buffers.block,
         literals: &mut buffers.literals,
     });
+    let mut decoder = VerifiedDecoder::new(
+        decoder,
+        Digest::from_bytes(COMPRESSED_SHA256),
+        COMPRESSED_SIZE,
+        Digest::from_bytes(DECOMPRESSED_SHA256),
+    );
     let mut extractor = EntryExtractor::new(target);
-    let mut compressed_hash = Sha256::new();
-    let mut decompressed_hash = Sha256::new();
-    let mut compressed_size = 0u64;
     let mut decompressed_size = 0u64;
     let mut input = [0u8; INPUT_SIZE];
 
@@ -160,84 +161,28 @@ pub(crate) async fn extract_reader<R: Read>(reader: &mut R, target: &[u8]) -> Re
         if length == 0 {
             break;
         }
-        compressed_hash.update(&input[..length]);
-        compressed_size += length as u64;
-        drive(
-            &mut decoder,
-            &input[..length],
-            &mut extractor,
-            stdout,
-            &mut decompressed_hash,
-            &mut decompressed_size,
-        )?;
+        decoder
+            .push(&input[..length], |bytes| {
+                consume_output(&mut extractor, stdout, bytes, &mut decompressed_size)
+            })
+            .map_err(layer_error)?;
     }
-    drain(
-        &mut decoder,
-        &mut extractor,
-        stdout,
-        &mut decompressed_hash,
-        &mut decompressed_size,
-    )?;
-    decoder.finish().map_err(|_| Failure::Decode)?;
+    decoder
+        .finish(|bytes| consume_output(&mut extractor, stdout, bytes, &mut decompressed_size))
+        .map_err(layer_error)?;
     extractor.finish().map_err(|_| Failure::Archive)?;
 
-    let compressed_digest: [u8; 32] = compressed_hash.finalize().into();
-    let decompressed_digest: [u8; 32] = decompressed_hash.finalize().into();
-    if compressed_size != COMPRESSED_SIZE
-        || compressed_digest != COMPRESSED_SHA256
-        || decompressed_size != DECOMPRESSED_SIZE
-        || decompressed_digest != DECOMPRESSED_SHA256
-    {
+    if decompressed_size != DECOMPRESSED_SIZE {
         return Err(Failure::Integrity);
     }
     Ok(())
 }
 
-fn drive(
-    decoder: &mut Decoder<'_>,
-    mut input: &[u8],
-    extractor: &mut EntryExtractor<'_>,
-    stdout: BorrowedFd<'_>,
-    decompressed_hash: &mut Sha256,
-    decompressed_size: &mut u64,
-) -> Result<(), Failure> {
-    while !input.is_empty() {
-        let step = decoder.decode(input).map_err(|_| Failure::Decode)?;
-        input = &input[step.consumed()..];
-        match step {
-            DecodeStep::Output { bytes, .. } => consume_output(
-                extractor,
-                stdout,
-                bytes,
-                decompressed_hash,
-                decompressed_size,
-            )?,
-            DecodeStep::NeedInput { .. } if !input.is_empty() => return Err(Failure::Decode),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn drain(
-    decoder: &mut Decoder<'_>,
-    extractor: &mut EntryExtractor<'_>,
-    stdout: BorrowedFd<'_>,
-    decompressed_hash: &mut Sha256,
-    decompressed_size: &mut u64,
-) -> Result<(), Failure> {
-    loop {
-        match decoder.decode(&[]).map_err(|_| Failure::Decode)? {
-            DecodeStep::Output { bytes, .. } => consume_output(
-                extractor,
-                stdout,
-                bytes,
-                decompressed_hash,
-                decompressed_size,
-            )?,
-            DecodeStep::FrameStarted { .. } | DecodeStep::FrameFinished { .. } => {}
-            DecodeStep::NeedInput { .. } => return Ok(()),
-        }
+fn layer_error(error: LayerError<Failure>) -> Failure {
+    match error {
+        LayerError::Format(_) => Failure::Decode,
+        LayerError::Integrity(_) => Failure::Integrity,
+        LayerError::Output(error) => error,
     }
 }
 
@@ -245,10 +190,8 @@ fn consume_output(
     extractor: &mut EntryExtractor<'_>,
     stdout: BorrowedFd<'_>,
     bytes: &[u8],
-    decompressed_hash: &mut Sha256,
     decompressed_size: &mut u64,
 ) -> Result<(), Failure> {
-    decompressed_hash.update(bytes);
     *decompressed_size += bytes.len() as u64;
     extractor
         .push(bytes, |contents| write_all(stdout, contents))

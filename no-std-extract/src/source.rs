@@ -1,12 +1,7 @@
 use core::ffi::CStr;
-use core::net::SocketAddr;
 
-use embedded_nal_async::{AddrType, Dns, TcpConnect};
-use mbedtls_rs::{
-    AuthMode, Certificate, ClientSessionConfig, Session, SessionConfig, Tls, TlsVersion, X509,
-};
-use reqwless::request::{Method, Request, RequestBuilder};
-use reqwless::response::{Response, StatusCode};
+use mbedtls_rs::{Certificate, Tls, X509};
+use oci_zero::registry::{Method, Request, Target};
 
 use crate::platform::{DnsResolver, OsRng, TcpStack};
 use crate::{extract_reader, Failure};
@@ -36,52 +31,42 @@ MrY=\n\
 -----END CERTIFICATE-----\n\0";
 
 pub async fn extract_https(url: &str, target: &[u8]) -> Result<(), Failure> {
-    let url = HttpsUrl::parse(url)?;
+    let request_target = Target::parse(url).map_err(|_| Failure::Usage)?;
+    let server_name = ServerName::parse(request_target.authority)?;
     let root = CStr::from_bytes_with_nul(ROOT_CERTIFICATE).map_err(|_| Failure::Tls)?;
     let certificate = Certificate::new(X509::PEM(root)).map_err(|_| Failure::Tls)?;
 
     let resolver = DnsResolver::google();
-    let address = resolver
-        .get_host_by_name(url.host, AddrType::Either)
-        .await
-        .map_err(|_| Failure::Network)?;
-    let stream = TcpStack
-        .connect(SocketAddr::new(address, url.port))
-        .await
-        .map_err(|_| Failure::Network)?;
-
     let mut random = OsRng::open().map_err(|_| Failure::Input)?;
     // SAFETY: `tls` and every session referencing it are dropped before
     // `random` at the end of this function.
     let tls = unsafe { Tls::new_local_borrows(&mut random) }.map_err(|_| Failure::Tls)?;
-    let server_name = url.server_name()?;
-    let config = SessionConfig::Client(ClientSessionConfig {
-        ca_chain: Some(certificate),
-        creds: None,
-        server_name: Some(server_name),
-        auth_mode: AuthMode::Required,
-        min_version: TlsVersion::Tls1_2,
-        alpn_protocols: None,
-    });
-    let mut session = Session::new(tls.reference(), stream, &config).map_err(|_| Failure::Tls)?;
-    session.connect().await.map_err(|_| Failure::Tls)?;
-    if session.tls_verification_details() != 0 {
-        return Err(Failure::Tls);
-    }
-
-    let request = Request::get(url.path).host(url.authority).build();
-    request
-        .write_header(&mut session)
-        .await
-        .map_err(|_| Failure::Http)?;
-    session.flush().await.map_err(|_| Failure::Network)?;
+    let mut session = oci_zero::tls::connect(
+        tls.reference(),
+        &TcpStack,
+        &resolver,
+        request_target,
+        server_name.as_cstr()?,
+        certificate,
+    )
+    .await
+    .map_err(|_| Failure::Tls)?;
 
     {
         let mut headers = [0u8; HEADER_BUFFER_SIZE];
-        let response = Response::read(&mut session, Method::GET, &mut headers)
-            .await
-            .map_err(|_| Failure::Http)?;
-        if response.status != StatusCode(200) {
+        let response = oci_zero::reqwless::send_on(
+            &mut session,
+            Request {
+                method: Method::Get,
+                target: request_target,
+                accept: "*/*",
+                authorization: None,
+            },
+            &mut headers,
+        )
+        .await
+        .map_err(|_| Failure::Http)?;
+        if response.status.0 != 200 {
             return Err(Failure::Http);
         }
 
@@ -92,25 +77,12 @@ pub async fn extract_https(url: &str, target: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
-struct HttpsUrl<'a> {
-    authority: &'a str,
-    host: &'a str,
-    path: &'a str,
-    port: u16,
+struct ServerName {
     server_name: [u8; 256],
 }
 
-impl<'a> HttpsUrl<'a> {
-    fn parse(url: &'a str) -> Result<Self, Failure> {
-        let remainder = url.strip_prefix("https://").ok_or(Failure::Usage)?;
-        let (authority, path) = match remainder.find('/') {
-            Some(index) => (&remainder[..index], &remainder[index..]),
-            None => (remainder, "/"),
-        };
-        if authority.is_empty() {
-            return Err(Failure::Usage);
-        }
-
+impl ServerName {
+    fn parse(authority: &str) -> Result<Self, Failure> {
         let (host, port) = match authority.rsplit_once(':') {
             Some((host, port)) if !host.is_empty() => {
                 let port = port.parse::<u16>().map_err(|_| Failure::Usage)?;
@@ -123,17 +95,11 @@ impl<'a> HttpsUrl<'a> {
         }
         let mut server_name = [0u8; 256];
         server_name[..host.len()].copy_from_slice(host.as_bytes());
-
-        Ok(Self {
-            authority,
-            host,
-            path,
-            port,
-            server_name,
-        })
+        let _ = port;
+        Ok(Self { server_name })
     }
 
-    fn server_name(&self) -> Result<&CStr, Failure> {
+    fn as_cstr(&self) -> Result<&CStr, Failure> {
         CStr::from_bytes_until_nul(&self.server_name).map_err(|_| Failure::Usage)
     }
 }
