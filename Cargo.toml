@@ -1,6 +1,6 @@
 [package]
 name = "oci-zero"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A no-std, allocation-free streaming core for OCI registries"
@@ -14,3 +14,4 @@ categories = ["no-std", "network-programming", "parser-implementations"]
 default = []
 
 [dependencies]
+sha2 = { version = "0.10", default-features = false }
