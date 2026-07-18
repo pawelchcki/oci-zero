@@ -6,6 +6,8 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod tar;
+
 pub mod digest;
 mod json;
 pub mod metadata;
