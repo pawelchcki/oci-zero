@@ -9,6 +9,197 @@ const CHECKSUM_RANGE: core::ops::Range<usize> = 148..156;
 const TYPE_OFFSET: usize = 156;
 const PREFIX_RANGE: core::ops::Range<usize> = 345..500;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteState {
+    Ready,
+    File { remaining: u64, size: u64 },
+    Finished,
+}
+
+/// Allocation-free writer for deterministic ustar archives.
+pub struct TarWriter {
+    state: WriteState,
+}
+
+impl TarWriter {
+    pub const fn new() -> Self {
+        Self {
+            state: WriteState::Ready,
+        }
+    }
+
+    pub fn begin_file<E>(
+        &mut self,
+        path: &[u8],
+        size: u64,
+        mode: u32,
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), TarWriteError<E>> {
+        if self.state != WriteState::Ready {
+            return Err(TarWriteError::InvalidState);
+        }
+        if path.is_empty()
+            || path.len() > NAME_RANGE.len()
+            || path[0] == b'/'
+            || path.contains(&0)
+            || path
+                .split(|byte| *byte == b'/')
+                .any(|component| component == b"..")
+        {
+            return Err(TarWriteError::InvalidPath);
+        }
+
+        let mut header = [0u8; BLOCK_SIZE];
+        header[..path.len()].copy_from_slice(path);
+        write_octal(&mut header[100..108], mode as u64).map_err(cast_write_error)?;
+        write_octal(&mut header[108..116], 0).map_err(cast_write_error)?;
+        write_octal(&mut header[116..124], 0).map_err(cast_write_error)?;
+        write_octal(&mut header[SIZE_RANGE], size).map_err(cast_write_error)?;
+        write_octal(&mut header[136..148], 0).map_err(cast_write_error)?;
+        header[CHECKSUM_RANGE].fill(b' ');
+        header[TYPE_OFFSET] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum = header.iter().map(|byte| *byte as u64).sum();
+        write_checksum(&mut header[CHECKSUM_RANGE], checksum).map_err(cast_write_error)?;
+        output(&header).map_err(TarWriteError::Output)?;
+        self.state = WriteState::File {
+            remaining: size,
+            size,
+        };
+        Ok(())
+    }
+
+    pub fn write_file_data<E>(
+        &mut self,
+        bytes: &[u8],
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), TarWriteError<E>> {
+        let WriteState::File { remaining, size } = self.state else {
+            return Err(TarWriteError::InvalidState);
+        };
+        if bytes.len() as u64 > remaining {
+            return Err(TarWriteError::TooMuchData);
+        }
+        output(bytes).map_err(TarWriteError::Output)?;
+        self.state = WriteState::File {
+            remaining: remaining - bytes.len() as u64,
+            size,
+        };
+        Ok(())
+    }
+
+    pub fn end_file<E>(
+        &mut self,
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), TarWriteError<E>> {
+        let WriteState::File { remaining, size } = self.state else {
+            return Err(TarWriteError::InvalidState);
+        };
+        if remaining != 0 {
+            return Err(TarWriteError::SizeMismatch { remaining });
+        }
+        let size_remainder = (size % BLOCK_SIZE as u64) as usize;
+        let padding = (BLOCK_SIZE - size_remainder) % BLOCK_SIZE;
+        if padding != 0 {
+            output(&[0; BLOCK_SIZE][..padding]).map_err(TarWriteError::Output)?;
+        }
+        self.state = WriteState::Ready;
+        Ok(())
+    }
+
+    pub fn finish<E>(
+        &mut self,
+        mut output: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), TarWriteError<E>> {
+        if self.state != WriteState::Ready {
+            return Err(TarWriteError::InvalidState);
+        }
+        output(&[0; BLOCK_SIZE * 2]).map_err(TarWriteError::Output)?;
+        self.state = WriteState::Finished;
+        Ok(())
+    }
+}
+
+impl Default for TarWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TarWriteError<E> {
+    InvalidState,
+    InvalidPath,
+    ValueTooLarge,
+    TooMuchData,
+    SizeMismatch { remaining: u64 },
+    Output(E),
+}
+
+impl<E: fmt::Display> fmt::Display for TarWriteError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidState => formatter.write_str("invalid tar writer state"),
+            Self::InvalidPath => formatter.write_str("invalid tar member path"),
+            Self::ValueTooLarge => formatter.write_str("tar header value is too large"),
+            Self::TooMuchData => formatter.write_str("tar member received too much data"),
+            Self::SizeMismatch { remaining } => {
+                write!(formatter, "tar member is missing {remaining} bytes")
+            }
+            Self::Output(error) => write!(formatter, "tar writer output failed: {error}"),
+        }
+    }
+}
+
+fn write_octal(
+    field: &mut [u8],
+    mut value: u64,
+) -> Result<(), TarWriteError<core::convert::Infallible>> {
+    field.fill(b'0');
+    let digits = field
+        .len()
+        .checked_sub(1)
+        .ok_or(TarWriteError::ValueTooLarge)?;
+    field[digits] = 0;
+    for index in (0..digits).rev() {
+        field[index] = b'0' + (value & 7) as u8;
+        value >>= 3;
+    }
+    if value != 0 {
+        return Err(TarWriteError::ValueTooLarge);
+    }
+    Ok(())
+}
+
+fn write_checksum(
+    field: &mut [u8],
+    mut value: u64,
+) -> Result<(), TarWriteError<core::convert::Infallible>> {
+    field.fill(b'0');
+    field[6] = 0;
+    field[7] = b' ';
+    for index in (0..6).rev() {
+        field[index] = b'0' + (value & 7) as u8;
+        value >>= 3;
+    }
+    if value != 0 {
+        return Err(TarWriteError::ValueTooLarge);
+    }
+    Ok(())
+}
+
+fn cast_write_error<E>(error: TarWriteError<core::convert::Infallible>) -> TarWriteError<E> {
+    match error {
+        TarWriteError::InvalidState => TarWriteError::InvalidState,
+        TarWriteError::InvalidPath => TarWriteError::InvalidPath,
+        TarWriteError::ValueTooLarge => TarWriteError::ValueTooLarge,
+        TarWriteError::TooMuchData => TarWriteError::TooMuchData,
+        TarWriteError::SizeMismatch { remaining } => TarWriteError::SizeMismatch { remaining },
+        TarWriteError::Output(never) => match never {},
+    }
+}
+
 /// A failure encountered while consuming a tar stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtractError<E> {
@@ -980,7 +1171,7 @@ fn decimal(bytes: &[u8]) -> Option<u64> {
 mod tests {
     use super::{
         Archive, ArchiveBuffers, Entry, EntryExtractor, EntryKind, ExtractError, FinishError,
-        LayerEventSink, BLOCK_SIZE,
+        LayerEventSink, TarWriteError, TarWriter, BLOCK_SIZE,
     };
     use std::{format, string::ToString, vec::Vec};
 
@@ -993,6 +1184,46 @@ mod tests {
         contents: Vec<u8>,
         whiteouts: Vec<Vec<u8>>,
         opaque: Vec<Vec<u8>>,
+    }
+
+    #[test]
+    fn writes_deterministic_ustar_files() {
+        let mut bytes = Vec::new();
+        let mut writer = TarWriter::new();
+        writer
+            .begin_file(b"blobs/sha256/abc", 5, 0o644, |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        writer
+            .write_file_data(b"hello", |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        writer
+            .end_file(|chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        writer
+            .finish(|chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert_eq!(&bytes[..18], b"blobs/sha256/abc\0\0");
+        assert_eq!(&bytes[BLOCK_SIZE..BLOCK_SIZE + 5], b"hello");
+        assert_eq!(bytes.len(), BLOCK_SIZE * 4);
+
+        let mut invalid = TarWriter::new();
+        assert_eq!(
+            invalid.begin_file(b"../escape", 0, 0o644, |_| Ok::<_, ()>(())),
+            Err(TarWriteError::InvalidPath)
+        );
     }
 
     impl LayerEventSink for Events {

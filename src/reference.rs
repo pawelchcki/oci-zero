@@ -25,39 +25,26 @@ pub enum Selector<'a> {
     Digest(Digest),
 }
 
+/// An OCI registry repository without a tag or digest selector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Reference<'a> {
+pub struct Repository<'a> {
     registry: &'a str,
     repository: &'a str,
-    selector: Selector<'a>,
 }
 
-impl<'a> Reference<'a> {
+impl<'a> Repository<'a> {
     pub fn parse(input: &'a str) -> Result<Self, ReferenceError> {
         let value = input
             .strip_prefix("oci://")
             .ok_or(ReferenceError::InvalidScheme)?;
-        let (registry, repository_and_selector) = value
+        let (registry, repository) = value
             .split_once('/')
             .ok_or(ReferenceError::MissingRepository)?;
         validate_registry(registry)?;
-
-        let (repository, selector) =
-            if let Some((repository, digest)) = repository_and_selector.rsplit_once('@') {
-                let digest = Digest::parse(digest).map_err(ReferenceError::Digest)?;
-                (repository, Selector::Digest(digest))
-            } else {
-                let (repository, tag) = repository_and_selector
-                    .rsplit_once(':')
-                    .ok_or(ReferenceError::MissingSelector)?;
-                validate_tag(tag)?;
-                (repository, Selector::Tag(tag))
-            };
         validate_repository(repository)?;
         Ok(Self {
             registry,
             repository,
-            selector,
         })
     }
 
@@ -69,18 +56,32 @@ impl<'a> Reference<'a> {
         self.repository
     }
 
-    pub const fn selector(&self) -> Selector<'a> {
-        self.selector
+    pub fn with_tag(self, tag: &'a str) -> Result<Reference<'a>, ReferenceError> {
+        validate_tag(tag)?;
+        Ok(Reference {
+            registry: self.registry,
+            repository: self.repository,
+            selector: Selector::Tag(tag),
+        })
+    }
+
+    pub const fn with_digest(self, digest: Digest) -> Reference<'a> {
+        Reference {
+            registry: self.registry,
+            repository: self.repository,
+            selector: Selector::Digest(digest),
+        }
     }
 
     pub fn manifest_path<'buffer>(
         &self,
+        selector: Selector<'_>,
         buffer: &'buffer mut [u8],
     ) -> Result<&'buffer str, ReferenceError> {
         let mut writer = BufferWriter::new(buffer);
         write!(writer, "/v2/{}/manifests/", self.repository)
             .map_err(|_| ReferenceError::BufferTooSmall)?;
-        match self.selector {
+        match selector {
             Selector::Tag(tag) => writer
                 .write_str(tag)
                 .map_err(|_| ReferenceError::BufferTooSmall)?,
@@ -129,6 +130,111 @@ impl<'a> Reference<'a> {
         buffer: &'buffer mut [u8],
     ) -> Result<&'buffer str, ReferenceError> {
         write_path(buffer, format_args!("/v2/{}/tags/list", self.repository))
+    }
+
+    pub fn tags_page_path<'buffer>(
+        &self,
+        page_size: u16,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        write_path(
+            buffer,
+            format_args!("/v2/{}/tags/list?n={page_size}", self.repository),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Reference<'a> {
+    registry: &'a str,
+    repository: &'a str,
+    selector: Selector<'a>,
+}
+
+impl<'a> Reference<'a> {
+    pub fn parse(input: &'a str) -> Result<Self, ReferenceError> {
+        let value = input
+            .strip_prefix("oci://")
+            .ok_or(ReferenceError::InvalidScheme)?;
+        let (registry, repository_and_selector) = value
+            .split_once('/')
+            .ok_or(ReferenceError::MissingRepository)?;
+        validate_registry(registry)?;
+
+        let (repository, selector) =
+            if let Some((repository, digest)) = repository_and_selector.rsplit_once('@') {
+                let digest = Digest::parse(digest).map_err(ReferenceError::Digest)?;
+                (repository, Selector::Digest(digest))
+            } else {
+                let (repository, tag) = repository_and_selector
+                    .rsplit_once(':')
+                    .ok_or(ReferenceError::MissingSelector)?;
+                validate_tag(tag)?;
+                (repository, Selector::Tag(tag))
+            };
+        validate_repository(repository)?;
+        Ok(Self {
+            registry,
+            repository,
+            selector,
+        })
+    }
+
+    pub const fn registry(&self) -> &'a str {
+        self.registry
+    }
+
+    pub const fn repository(&self) -> &'a str {
+        self.repository
+    }
+
+    pub const fn selector(&self) -> Selector<'a> {
+        self.selector
+    }
+
+    pub const fn as_repository(&self) -> Repository<'a> {
+        Repository {
+            registry: self.registry,
+            repository: self.repository,
+        }
+    }
+
+    pub fn manifest_path<'buffer>(
+        &self,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        self.as_repository().manifest_path(self.selector, buffer)
+    }
+
+    pub fn manifest_digest_path<'buffer>(
+        &self,
+        digest: Digest,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        self.as_repository().manifest_digest_path(digest, buffer)
+    }
+
+    pub fn blob_path<'buffer>(
+        &self,
+        digest: Digest,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        self.as_repository().blob_path(digest, buffer)
+    }
+
+    pub fn referrers_path<'buffer>(
+        &self,
+        digest: Digest,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        self.as_repository().referrers_path(digest, buffer)
+    }
+
+    pub fn tags_path<'buffer>(
+        &self,
+        buffer: &'buffer mut [u8],
+    ) -> Result<&'buffer str, ReferenceError> {
+        self.as_repository().tags_path(buffer)
     }
 }
 
@@ -265,7 +371,7 @@ impl fmt::Write for BufferWriter<'_> {
 mod tests {
     use std::format;
 
-    use super::{Reference, ReferenceError, Selector};
+    use super::{Reference, ReferenceError, Repository, Selector};
 
     #[test]
     fn parses_tags_and_digests() {
@@ -294,6 +400,26 @@ mod tests {
         assert_eq!(
             reference.manifest_path(&mut [0; 4]),
             Err(ReferenceError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn builds_references_and_tag_pages_from_repositories() {
+        let repository = Repository::parse("oci://example.com/team/image").unwrap();
+        assert_eq!(repository.registry(), "example.com");
+        assert_eq!(repository.repository(), "team/image");
+        assert_eq!(
+            repository.with_tag("latest").unwrap().selector(),
+            Selector::Tag("latest")
+        );
+        let mut path = [0; 64];
+        assert_eq!(
+            repository.tags_page_path(100, &mut path).unwrap(),
+            "/v2/team/image/tags/list?n=100"
+        );
+        assert_eq!(
+            Repository::parse("oci://example.com/image:tag"),
+            Err(ReferenceError::InvalidRepository)
         );
     }
 }

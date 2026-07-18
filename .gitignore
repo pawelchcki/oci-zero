@@ -1,3 +1,8 @@
 /Cargo.lock
 /target/
 __pycache__/
+/web/pkg/
+/web/node_modules/
+/web/playwright-report/
+/web/dist/
+/web/test-results/
