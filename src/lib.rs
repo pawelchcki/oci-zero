@@ -9,4 +9,6 @@ extern crate std;
 pub mod digest;
 mod json;
 pub mod metadata;
+pub mod pull;
 pub mod reference;
+pub mod registry;
