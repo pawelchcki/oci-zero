@@ -11,7 +11,7 @@ keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
 
 [workspace]
-members = ["zstd-zero"]
+members = ["gzip-zero", "zstd-zero"]
 resolver = "2"
 
 [profile.dev]
@@ -22,8 +22,10 @@ panic = "abort"
 
 [features]
 default = []
+gzip = ["dep:gzip-zero"]
 zstd = ["dep:zstd-zero"]
 
 [dependencies]
+gzip-zero = { version = "0.1.0", path = "gzip-zero", optional = true }
 sha2 = { version = "0.10", default-features = false }
 zstd-zero = { version = "0.1.0", path = "zstd-zero", optional = true }
