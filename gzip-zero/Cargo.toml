@@ -17,4 +17,4 @@ default = []
 miniz_oxide = { version = "0.9.1", default-features = false }
 
 [dev-dependencies]
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib"] }
