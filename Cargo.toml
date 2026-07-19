@@ -10,8 +10,20 @@ readme = "README.md"
 keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
 
+[workspace]
+members = ["zstd-zero"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [features]
 default = []
+zstd = ["dep:zstd-zero"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+zstd-zero = { version = "0.1.0", path = "zstd-zero", optional = true }

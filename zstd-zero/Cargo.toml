@@ -1,0 +1,22 @@
+[package]
+name = "zstd-zero"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A no-std, allocation-free streaming Zstandard decoder"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pawelchcki/oci-zero"
+keywords = ["zstd", "zstandard", "no-std", "compression"]
+categories = ["compression", "no-std"]
+
+[features]
+default = []
+
+[dependencies]
+
+[dev-dependencies]
+sha2 = { version = "0.10", default-features = false }
+ureq = { version = "=2.9.7", default-features = false, features = ["tls"] }
+url = "=2.4.1"
+zeroize = "=1.8.1"
+zstd = "0.13"
