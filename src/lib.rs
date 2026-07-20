@@ -8,8 +8,10 @@ extern crate std;
 
 pub mod tar;
 
+pub mod compression;
 pub mod digest;
 mod json;
+pub mod layer;
 pub mod metadata;
 pub mod pull;
 pub mod reference;
