@@ -16,3 +16,9 @@ pub mod metadata;
 pub mod pull;
 pub mod reference;
 pub mod registry;
+
+#[cfg(feature = "reqwless")]
+pub mod reqwless;
+
+#[cfg(feature = "tls")]
+pub mod tls;
