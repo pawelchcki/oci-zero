@@ -11,7 +11,7 @@ keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
 
 [workspace]
-members = ["gzip-zero", "zstd-zero"]
+members = ["gzip-zero", "no-std-extract", "zstd-zero"]
 resolver = "2"
 
 [profile.dev]
