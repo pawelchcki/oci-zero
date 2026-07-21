@@ -41,3 +41,13 @@ mbedtls-rs = { version = "0.1", default-features = false, features = ["tls"], op
 reqwless = { version = "0.14", default-features = false, optional = true }
 sha2 = { version = "0.10", default-features = false }
 zstd-zero = { version = "0.1.0", path = "zstd-zero", optional = true }
+
+[dev-dependencies]
+ureq = { version = "=2.9.7", default-features = false, features = ["tls"] }
+# Keep ureq's transitive dependencies compatible with the crate's Rust 1.75 MSRV.
+url = "=2.4.1"
+zeroize = "=1.8.1"
+
+[[example]]
+name = "extract_file"
+required-features = ["zstd"]
