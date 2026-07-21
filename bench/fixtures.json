@@ -1,0 +1,38 @@
+{
+  "fixtures": {
+    "datadog-10m-w32m": {
+      "compressed_bytes": 3651442,
+      "compressed_digest": "sha256:bc219703080f03ad836d51bf7f72cc3ced34f5ba440a49f450d6a5dea98ceff4",
+      "decompressed_bytes": 10878976,
+      "decompressed_digest": "sha256:5a1ed449ecc69d1accd5c5ddca23eda62f214bcfb5f2e953c6da38caf17d26ae",
+      "entry": "application_monitoring.yaml.example",
+      "history_bytes": 33554432,
+      "payload_bytes": 10878976,
+      "reference": "oci://install.datadoghq.com/agent-package@sha256:7ab3a71476f068c21399250e66a2b1ab366437489510ee12c2119bba75afcde9",
+      "url": "https://install.datadoghq.com/v2/agent-package/blobs/sha256:bc219703080f03ad836d51bf7f72cc3ced34f5ba440a49f450d6a5dea98ceff4"
+    },
+    "ghcr-64m-w64k": {
+      "compressed_bytes": 67112475,
+      "compressed_digest": "sha256:e79c43fc1e55b6a4e45b4943b268f50078434d850aad433518efb41b20f66183",
+      "decompressed_bytes": 67112960,
+      "decompressed_digest": "sha256:8fa83690ab9d2b86bda06a0ee35eb225cc106df9ee8f088e3e45e48aaa2b5c8b",
+      "entry": "payload.bin",
+      "history_bytes": 65536,
+      "payload_bytes": 67108864,
+      "reference": "ghcr.io/pawelchcki/oci-zero-small-window-fixtures@sha256:586c2d89a1b1464f2d383cffd414eb81dea5f717881775f46fbab45148b2870c",
+      "url": "https://ghcr.io/v2/pawelchcki/oci-zero-small-window-fixtures/blobs/sha256:e79c43fc1e55b6a4e45b4943b268f50078434d850aad433518efb41b20f66183"
+    },
+    "ghcr-256m-w256k": {
+      "compressed_bytes": 268442139,
+      "compressed_digest": "sha256:2133a9f1cf4f8033118a631ff25fe0bed7a43b7093c6e73a045cc14e373ff6bc",
+      "decompressed_bytes": 268441600,
+      "decompressed_digest": "sha256:25236f39e42d5e4ad40719a0341b0efe63ceb7a2735b2f71f2e8ede542a80726",
+      "entry": "payload.bin",
+      "history_bytes": 262144,
+      "payload_bytes": 268435456,
+      "reference": "ghcr.io/pawelchcki/oci-zero-small-window-fixtures@sha256:e92048e37a5696ec6f9208f1fd62e3b5ee5672544a1d08954b9716e004c773c1",
+      "url": "https://ghcr.io/v2/pawelchcki/oci-zero-small-window-fixtures/blobs/sha256:2133a9f1cf4f8033118a631ff25fe0bed7a43b7093c6e73a045cc14e373ff6bc"
+    }
+  },
+  "schema_version": 1
+}
