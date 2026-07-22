@@ -77,6 +77,17 @@ impl<'a> ImageIndex<'a> {
         optional_string(self.object, "mediaType")
     }
 
+    pub fn artifact_type(self) -> Result<Option<JsonString<'a>>, MetadataError> {
+        optional_string(self.object, "artifactType")
+    }
+
+    pub fn subject(self) -> Result<Option<Descriptor<'a>>, MetadataError> {
+        self.object
+            .get("subject")?
+            .map(Descriptor::parse)
+            .transpose()
+    }
+
     pub fn manifests(self) -> Result<DescriptorIter<'a>, MetadataError> {
         Ok(DescriptorIter {
             inner: self.object.required("manifests")?.array()?.iter(),
@@ -340,6 +351,24 @@ impl<'a> TagList<'a> {
     }
 }
 
+/// A Docker Distribution registry catalog response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Catalog<'a> {
+    object: Object<'a>,
+}
+
+impl<'a> Catalog<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, MetadataError> {
+        Ok(Self {
+            object: Value::parse_document(bytes)?.object()?,
+        })
+    }
+
+    pub fn repositories(self) -> Result<StringIter<'a>, MetadataError> {
+        strings(self.object, "repositories")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataError {
     Json(JsonError),
@@ -436,6 +465,7 @@ fn optional_string<'a>(
 fn annotations<'a>(object: Object<'a>) -> Result<AnnotationIter<'a>, MetadataError> {
     let inner = object
         .get("annotations")?
+        .filter(|value| !value.is_null())
         .map(Value::object)
         .transpose()?
         .map(Object::iter);
@@ -445,6 +475,7 @@ fn annotations<'a>(object: Object<'a>) -> Result<AnnotationIter<'a>, MetadataErr
 fn strings<'a>(object: Object<'a>, name: &'static str) -> Result<StringIter<'a>, MetadataError> {
     let inner = object
         .get(name)?
+        .filter(|value| !value.is_null())
         .map(Value::array)
         .transpose()?
         .map(|array| array.iter());
@@ -453,19 +484,28 @@ fn strings<'a>(object: Object<'a>, name: &'static str) -> Result<StringIter<'a>,
 
 #[cfg(test)]
 mod tests {
-    use std::{format, string::ToString};
+    use std::{format, string::ToString, vec::Vec};
 
-    use super::{Document, DocumentKind, ImageConfig, MetadataError};
+    use super::{Catalog, Document, DocumentKind, ImageConfig, MetadataError, TagList};
 
     const DIGEST: &str = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
     fn parses_index_descriptors_lazily() {
         let json = format!(
-            r#"{{"schemaVersion":2,"unknown":{{"large":[1,2,3]}},"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":3,"digest":"{DIGEST}","platform":{{"architecture":"amd64","os":"linux"}},"annotations":{{"title":"value\n"}}}}]}}"#
+            r#"{{"schemaVersion":2,"artifactType":"application/example","subject":{{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":3,"digest":"{DIGEST}"}},"unknown":{{"large":[1,2,3]}},"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":3,"digest":"{DIGEST}","platform":{{"architecture":"amd64","os":"linux"}},"annotations":{{"title":"value\n"}}}}]}}"#
         );
         let document = Document::parse(json.as_bytes()).unwrap();
         assert_eq!(document.kind(), DocumentKind::Index);
+        let index = document.index().unwrap();
+        assert_eq!(
+            index.artifact_type().unwrap().unwrap().as_str(),
+            Some("application/example")
+        );
+        assert_eq!(
+            index.subject().unwrap().unwrap().digest().to_string(),
+            DIGEST
+        );
         let descriptor = document
             .index()
             .unwrap()
@@ -507,6 +547,24 @@ mod tests {
                 .to_string(),
             DIGEST
         );
+    }
+
+    #[test]
+    fn parses_catalogs_and_tag_lists() {
+        let catalog = Catalog::parse(br#"{"repositories":["a","team/b"]}"#).unwrap();
+        let repositories = catalog
+            .repositories()
+            .unwrap()
+            .map(|value| value.unwrap().as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(repositories, ["a", "team/b"]);
+
+        let tags = TagList::parse(br#"{"name":"team/b","tags":["latest","v1"]}"#).unwrap();
+        assert_eq!(tags.name().unwrap().as_str(), Some("team/b"));
+        assert_eq!(tags.tags().unwrap().count(), 2);
+
+        let empty = TagList::parse(br#"{"name":"empty","tags":null}"#).unwrap();
+        assert_eq!(empty.tags().unwrap().count(), 0);
     }
 
     #[test]

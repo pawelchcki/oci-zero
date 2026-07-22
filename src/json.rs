@@ -166,6 +166,10 @@ impl<'a> Value<'a> {
         }
         value.parse().map_err(|_| JsonError::InvalidNumber)
     }
+
+    pub(crate) fn is_null(self) -> bool {
+        self.bytes == b"null"
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

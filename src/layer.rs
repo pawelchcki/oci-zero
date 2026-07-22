@@ -152,7 +152,8 @@ impl DecodeStep<'_> {
 pub struct VerifiedDecoder<'a> {
     decoder: Decoder<'a>,
     compressed: Verifier,
-    uncompressed: Verifier,
+    uncompressed: Option<Verifier>,
+    decompressed_size: u64,
 }
 
 /// Verifies and decodes a layer while extracting one regular tar entry.
@@ -362,7 +363,26 @@ impl<'a> VerifiedDecoder<'a> {
         Self {
             decoder,
             compressed: Verifier::new(compressed_digest, compressed_size),
-            uncompressed: Verifier::digest_only(diff_id),
+            uncompressed: Some(Verifier::digest_only(diff_id)),
+            decompressed_size: 0,
+        }
+    }
+
+    /// Creates a decoder that verifies the compressed descriptor only.
+    ///
+    /// OCI artifacts commonly use layer archives without an image config's
+    /// `rootfs.diff_ids`. Decoded byte accounting remains available, but no
+    /// uncompressed digest is expected or checked.
+    pub fn compressed_only(
+        decoder: Decoder<'a>,
+        compressed_digest: Digest,
+        compressed_size: u64,
+    ) -> Self {
+        Self {
+            decoder,
+            compressed: Verifier::new(compressed_digest, compressed_size),
+            uncompressed: None,
+            decompressed_size: 0,
         }
     }
 
@@ -380,9 +400,10 @@ impl<'a> VerifiedDecoder<'a> {
             let step = self.decoder.decode(remaining).map_err(LayerError::Format)?;
             let consumed = step.consumed();
             if let DecodeStep::Output { bytes, .. } = step {
-                self.uncompressed
-                    .update(bytes)
-                    .map_err(LayerError::Integrity)?;
+                self.decompressed_size += bytes.len() as u64;
+                if let Some(uncompressed) = &mut self.uncompressed {
+                    uncompressed.update(bytes).map_err(LayerError::Integrity)?;
+                }
                 output(bytes).map_err(LayerError::Output)?;
             }
             if consumed == 0 {
@@ -403,7 +424,7 @@ impl<'a> VerifiedDecoder<'a> {
     }
 
     pub const fn decompressed_size(&self) -> u64 {
-        self.uncompressed.actual_size()
+        self.decompressed_size
     }
 
     pub fn finish<E>(
@@ -413,9 +434,10 @@ impl<'a> VerifiedDecoder<'a> {
         loop {
             match self.decoder.decode(&[]).map_err(LayerError::Format)? {
                 DecodeStep::Output { bytes, .. } => {
-                    self.uncompressed
-                        .update(bytes)
-                        .map_err(LayerError::Integrity)?;
+                    self.decompressed_size += bytes.len() as u64;
+                    if let Some(uncompressed) = &mut self.uncompressed {
+                        uncompressed.update(bytes).map_err(LayerError::Integrity)?;
+                    }
                     output(bytes).map_err(LayerError::Output)?;
                 }
                 DecodeStep::Progress { .. } => {}
@@ -424,7 +446,10 @@ impl<'a> VerifiedDecoder<'a> {
         }
         self.decoder.finish().map_err(LayerError::Format)?;
         self.compressed.finish().map_err(LayerError::Integrity)?;
-        self.uncompressed.finish().map_err(LayerError::Integrity)
+        if let Some(uncompressed) = &self.uncompressed {
+            uncompressed.finish().map_err(LayerError::Integrity)?;
+        }
+        Ok(())
     }
 }
 
@@ -545,6 +570,34 @@ mod tests {
             .unwrap();
         decoder.finish(|_| Ok::<_, ()>(())).unwrap();
         assert_eq!(&output, bytes);
+    }
+
+    #[test]
+    fn compressed_only_accepts_content_without_a_diff_id() {
+        let bytes = b"artifact contents";
+        let digest = Digest::from_bytes(Sha256::digest(bytes).into());
+        let mut decoder =
+            VerifiedDecoder::compressed_only(Decoder::tar(), digest, bytes.len() as u64);
+        decoder.push(bytes, |_| Ok::<_, ()>(())).unwrap();
+        decoder.finish(|_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(decoder.decompressed_size(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn compressed_only_still_verifies_descriptor_digest_and_size() {
+        let bytes = b"artifact contents";
+        let digest = Digest::from_bytes(Sha256::digest(bytes).into());
+        let mut wrong_digest = VerifiedDecoder::compressed_only(
+            Decoder::tar(),
+            Digest::from_bytes([9; 32]),
+            bytes.len() as u64,
+        );
+        wrong_digest.push(bytes, |_| Ok::<_, ()>(())).unwrap();
+        assert!(wrong_digest.finish(|_| Ok::<_, ()>(())).is_err());
+
+        let mut wrong_size = VerifiedDecoder::compressed_only(Decoder::tar(), digest, 1);
+        wrong_size.push(bytes, |_| Ok::<_, ()>(())).unwrap();
+        assert!(wrong_size.finish(|_| Ok::<_, ()>(())).is_err());
     }
 
     #[test]

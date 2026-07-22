@@ -6,7 +6,7 @@ use crate::{
     digest::Digest,
     json::Value,
     metadata::{JsonString, MetadataError},
-    reference::{Reference, ReferenceError, Scheme},
+    reference::{Reference, ReferenceError, Repository, Scheme, Selector},
 };
 
 pub const MANIFEST_ACCEPT: &str = concat!(
@@ -76,6 +76,7 @@ pub struct Request<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadOperation {
     Probe,
+    Catalog,
     Manifest,
     Blob,
     Referrers,
@@ -83,20 +84,45 @@ pub enum ReadOperation {
 }
 
 pub struct RequestPlanner<'reference> {
-    reference: Reference<'reference>,
+    repository: Repository<'reference>,
+    selector: Option<Selector<'reference>>,
     scheme: Scheme,
 }
 
 impl<'reference> RequestPlanner<'reference> {
     pub const fn new(reference: Reference<'reference>) -> Self {
         Self {
-            reference,
+            repository: reference.as_repository(),
+            selector: Some(reference.selector()),
             scheme: Scheme::Https,
         }
     }
 
     pub const fn with_scheme(reference: Reference<'reference>, scheme: Scheme) -> Self {
-        Self { reference, scheme }
+        Self {
+            repository: reference.as_repository(),
+            selector: Some(reference.selector()),
+            scheme,
+        }
+    }
+
+    pub const fn for_repository(repository: Repository<'reference>) -> Self {
+        Self {
+            repository,
+            selector: None,
+            scheme: Scheme::Https,
+        }
+    }
+
+    pub const fn for_repository_with_scheme(
+        repository: Repository<'reference>,
+        scheme: Scheme,
+    ) -> Self {
+        Self {
+            repository,
+            selector: None,
+            scheme,
+        }
     }
 
     pub fn probe<'buffer>(
@@ -106,7 +132,7 @@ impl<'reference> RequestPlanner<'reference> {
         copy_request(
             buffer,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             "/v2/",
             "*/*",
         )
@@ -117,14 +143,15 @@ impl<'reference> RequestPlanner<'reference> {
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
         let path_length = {
-            let path = self.reference.manifest_path(buffer)?;
+            let selector = self.selector.ok_or(ReferenceError::MissingSelector)?;
+            let path = self.repository.manifest_path(selector, buffer)?;
             path.len()
         };
         request_from_path(
             buffer,
             path_length,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             MANIFEST_ACCEPT,
         )
     }
@@ -144,14 +171,14 @@ impl<'reference> RequestPlanner<'reference> {
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
         let path_length = {
-            let path = self.reference.manifest_digest_path(digest, buffer)?;
+            let path = self.repository.manifest_digest_path(digest, buffer)?;
             path.len()
         };
         request_from_path(
             buffer,
             path_length,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             MANIFEST_ACCEPT,
         )
     }
@@ -163,14 +190,14 @@ impl<'reference> RequestPlanner<'reference> {
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
         let path_length = {
-            let path = self.reference.blob_path(digest, buffer)?;
+            let path = self.repository.blob_path(digest, buffer)?;
             path.len()
         };
         request_from_path(
             buffer,
             path_length,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             accept,
         )
     }
@@ -192,14 +219,14 @@ impl<'reference> RequestPlanner<'reference> {
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
         let path_length = {
-            let path = self.reference.referrers_path(digest, buffer)?;
+            let path = self.repository.referrers_path(digest, buffer)?;
             path.len()
         };
         request_from_path(
             buffer,
             path_length,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             OCI_INDEX_ACCEPT,
         )
     }
@@ -209,14 +236,35 @@ impl<'reference> RequestPlanner<'reference> {
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
         let path_length = {
-            let path = self.reference.tags_path(buffer)?;
+            let path = self.repository.tags_path(buffer)?;
             path.len()
         };
         request_from_path(
             buffer,
             path_length,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
+            "application/json",
+        )
+    }
+
+    pub fn tags_page<'buffer>(
+        &'buffer self,
+        page_size: u16,
+        buffer: &'buffer mut [u8],
+    ) -> Result<Request<'buffer>, RegistryError> {
+        if page_size == 0 {
+            return Err(RegistryError::InvalidPageSize);
+        }
+        let path_length = {
+            let path = self.repository.tags_page_path(page_size, buffer)?;
+            path.len()
+        };
+        request_from_path(
+            buffer,
+            path_length,
+            self.scheme,
+            self.repository.registry(),
             "application/json",
         )
     }
@@ -232,14 +280,14 @@ impl<'reference> RequestPlanner<'reference> {
         let mut path = [0; 384];
         let prefix = b"/v2/";
         let middle = b"/manifests/";
-        let needed = prefix.len() + self.reference.repository().len() + middle.len() + length;
+        let needed = prefix.len() + self.repository.repository().len() + middle.len() + length;
         if needed > path.len() {
             return Err(RegistryError::BufferTooSmall);
         }
         let mut position = 0;
         for part in [
             prefix.as_slice(),
-            self.reference.repository().as_bytes(),
+            self.repository.repository().as_bytes(),
             middle.as_slice(),
             &digest_text[..length],
         ] {
@@ -250,9 +298,69 @@ impl<'reference> RequestPlanner<'reference> {
         copy_request(
             buffer,
             self.scheme,
-            self.reference.registry(),
+            self.repository.registry(),
             path,
             MANIFEST_ACCEPT,
+        )
+    }
+}
+
+/// Plans registry-wide requests that do not require a repository name.
+pub struct RegistryRequestPlanner<'authority> {
+    authority: &'authority str,
+    scheme: Scheme,
+}
+
+impl<'authority> RegistryRequestPlanner<'authority> {
+    pub fn new(authority: &'authority str) -> Result<Self, RegistryError> {
+        Self::with_scheme(authority, Scheme::Https)
+    }
+
+    pub fn with_scheme(authority: &'authority str, scheme: Scheme) -> Result<Self, RegistryError> {
+        validate_authority(authority)?;
+        Ok(Self { authority, scheme })
+    }
+
+    pub fn probe<'buffer>(
+        &'buffer self,
+        buffer: &'buffer mut [u8],
+    ) -> Result<Request<'buffer>, RegistryError> {
+        copy_request(buffer, self.scheme, self.authority, "/v2/", "*/*")
+    }
+
+    pub fn catalog<'buffer>(
+        &'buffer self,
+        buffer: &'buffer mut [u8],
+    ) -> Result<Request<'buffer>, RegistryError> {
+        copy_request(
+            buffer,
+            self.scheme,
+            self.authority,
+            "/v2/_catalog",
+            "application/json",
+        )
+    }
+
+    pub fn catalog_page<'buffer>(
+        &'buffer self,
+        page_size: u16,
+        buffer: &'buffer mut [u8],
+    ) -> Result<Request<'buffer>, RegistryError> {
+        if page_size == 0 {
+            return Err(RegistryError::InvalidPageSize);
+        }
+        const PREFIX: &[u8] = b"/v2/_catalog?n=";
+        if buffer.len() < PREFIX.len() {
+            return Err(RegistryError::BufferTooSmall);
+        }
+        buffer[..PREFIX.len()].copy_from_slice(PREFIX);
+        let digits = write_display(&mut buffer[PREFIX.len()..], page_size)?;
+        request_from_path(
+            buffer,
+            PREFIX.len() + digits,
+            self.scheme,
+            self.authority,
+            "application/json",
         )
     }
 }
@@ -612,6 +720,7 @@ pub enum RegistryError {
     InvalidTokenResponse,
     HttpStatus(u16),
     BufferTooSmall,
+    InvalidPageSize,
     InsecureRedirect,
     RelativeRedirectRequiresResolution,
     InvalidCredentials,
@@ -632,6 +741,7 @@ impl fmt::Display for RegistryError {
             Self::InvalidTokenResponse => formatter.write_str("invalid registry token response"),
             Self::HttpStatus(status) => write!(formatter, "registry returned HTTP {status}"),
             Self::BufferTooSmall => formatter.write_str("registry scratch buffer is too small"),
+            Self::InvalidPageSize => formatter.write_str("registry page size must be non-zero"),
             Self::InsecureRedirect => formatter.write_str("HTTPS to HTTP redirect was rejected"),
             Self::RelativeRedirectRequiresResolution => {
                 formatter.write_str("relative redirect requires transport URL resolution")
@@ -677,6 +787,18 @@ fn request_from_path<'a>(
         accept,
         authorization: None,
     })
+}
+
+fn validate_authority(authority: &str) -> Result<(), RegistryError> {
+    if authority.is_empty()
+        || !authority.is_ascii()
+        || authority
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'@' | b'?' | b'#'))
+    {
+        return Err(RegistryError::InvalidUrl);
+    }
+    Ok(())
 }
 
 fn copy_request<'a>(
@@ -768,9 +890,46 @@ fn write_display(buffer: &mut [u8], value: impl fmt::Display) -> Result<usize, R
 mod tests {
     use super::{
         basic_authorization, bearer_token_url, validate_redirect, AuthChallenge, Credentials,
-        Header, Redirect, ResponseAction, ResponseHead, RetryAfter, Target, TokenResponse,
+        Header, Redirect, RegistryError, RegistryRequestPlanner, RequestPlanner, ResponseAction,
+        ResponseHead, RetryAfter, Target, TokenResponse,
     };
-    use crate::reference::Scheme;
+    use crate::reference::{Repository, Scheme};
+
+    #[test]
+    fn plans_paginated_catalogs_and_tags() {
+        let registry = RegistryRequestPlanner::new("registry.example").unwrap();
+        let mut catalog_path = [0; 64];
+        assert_eq!(
+            registry
+                .catalog_page(100, &mut catalog_path)
+                .unwrap()
+                .target
+                .path_and_query,
+            "/v2/_catalog?n=100"
+        );
+        assert!(matches!(
+            registry.catalog_page(0, &mut catalog_path),
+            Err(RegistryError::InvalidPageSize)
+        ));
+
+        let repository = Repository::parse("oci://registry.example/team/image").unwrap();
+        let planner = RequestPlanner::for_repository(repository);
+        let mut tags_path = [0; 64];
+        assert_eq!(
+            planner
+                .tags_page(50, &mut tags_path)
+                .unwrap()
+                .target
+                .path_and_query,
+            "/v2/team/image/tags/list?n=50"
+        );
+        assert!(matches!(
+            planner.manifest(&mut tags_path),
+            Err(RegistryError::Reference(
+                crate::reference::ReferenceError::MissingSelector
+            ))
+        ));
+    }
 
     #[test]
     fn parses_bearer_challenges() {
