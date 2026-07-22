@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "OCI Zero Browser",
+  "version": "0.1.0",
+  "description": "Browse OCI and Docker Distribution registries with oci-zero WebAssembly.",
+  "action": {
+    "default_title": "Open OCI Zero Browser"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["webRequest"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

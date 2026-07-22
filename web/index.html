@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OCI Zero Browser</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">OCI ZERO</p>
+        <h1>Registry browser</h1>
+      </div>
+      <span id="runtime-badge" class="badge">loading</span>
+    </header>
+
+    <main class="explorer">
+      <aside class="navigation">
+        <section>
+          <h2>Open a repository</h2>
+          <form id="repository-form">
+            <label for="repository-input">Registry / repository</label>
+            <div class="input-row">
+              <input id="repository-input" autocomplete="off" value="install.datadoghq.com/agent-package">
+              <button type="submit">Browse tags</button>
+            </div>
+          </form>
+          <form id="catalog-form">
+            <label for="registry-input">Registry catalog</label>
+            <div class="input-row">
+              <input id="registry-input" autocomplete="off" value="registry-1.docker.io">
+              <button type="submit" class="secondary">Open catalog</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="catalog-panel" class="nav-panel hidden">
+          <div class="panel-heading">
+            <h2>Repositories</h2>
+            <button id="catalog-more" class="secondary hidden" aria-label="Load more repositories">Load more</button>
+          </div>
+          <div class="control-grid">
+            <label for="catalog-filter">Filter loaded repositories</label>
+            <input id="catalog-filter" class="filter" placeholder="Repository path" autocomplete="off">
+            <label for="catalog-sort">Sort repositories</label>
+            <select id="catalog-sort">
+              <option value="name-asc">Name (A–Z)</option>
+              <option value="name-desc">Name (Z–A)</option>
+            </select>
+          </div>
+          <p id="catalog-count" class="muted live-count" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div class="scan-actions">
+            <button id="catalog-search-all" class="secondary hidden">Search remaining pages</button>
+            <button id="catalog-cancel-search" class="secondary hidden">Cancel search</button>
+          </div>
+          <p id="catalog-progress" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="catalog-results" class="virtual-list" aria-label="Loaded repositories"></div>
+        </section>
+
+        <section id="tags-panel" class="nav-panel hidden">
+          <div class="panel-heading">
+            <div><p class="eyebrow" id="repository-name"></p><h2>Versions</h2></div>
+            <button id="tags-more" class="secondary hidden" aria-label="Load more tags">Load more</button>
+          </div>
+          <div class="control-grid">
+            <label for="tag-filter">Filter loaded tags and resolved digests</label>
+            <input id="tag-filter" class="filter" placeholder="Tag name or resolved digest" autocomplete="off">
+            <label for="tag-sort">Sort tags</label>
+            <select id="tag-sort">
+              <option value="version-desc">Version (newest first)</option>
+              <option value="name-asc">Name (A–Z)</option>
+              <option value="name-desc">Name (Z–A)</option>
+            </select>
+          </div>
+          <p id="tag-limit" class="muted live-count" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div class="scan-actions">
+            <button id="tags-search-all" class="secondary hidden">Search remaining pages</button>
+            <button id="tags-cancel-search" class="secondary hidden">Cancel search</button>
+          </div>
+          <p id="tags-progress" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="tag-results" class="virtual-list tag-virtual-list" aria-label="Loaded tags"></div>
+        </section>
+
+        <details class="examples">
+          <summary>Examples</summary>
+          <h2>Registries</h2>
+          <div id="registry-presets" class="preset-grid"></div>
+          <h2>Repositories</h2>
+          <div id="repository-presets" class="preset-list"></div>
+        </details>
+      </aside>
+
+      <div class="workspace">
+        <div id="permission-box" class="notice hidden">
+          <span id="permission-message"></span>
+          <button id="permission-button">Grant access</button>
+        </div>
+        <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
+
+        <section id="metadata-panel" class="panel hidden">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" id="selection-name"></p>
+              <h2>Metadata</h2>
+            </div>
+            <div id="image-actions" class="actions hidden">
+              <button id="scan-files">Scan all layers</button>
+              <button id="export-oci" class="secondary">Download OCI</button>
+              <button id="export-docker" class="secondary">Download Docker</button>
+            </div>
+          </div>
+          <div id="platforms" class="platforms"></div>
+          <div id="descriptors"></div>
+          <details>
+            <summary>Raw manifest JSON</summary>
+            <pre id="manifest-json"></pre>
+          </details>
+          <details id="config-details" class="hidden">
+            <summary>Raw image config JSON</summary>
+            <pre id="config-json"></pre>
+          </details>
+        </section>
+
+        <section id="files-panel" class="panel hidden">
+          <div class="panel-heading">
+            <h2>Merged filesystem</h2>
+            <span id="file-count" class="badge"></span>
+          </div>
+          <label for="file-filter">Filter loaded file paths</label>
+          <input id="file-filter" class="filter" placeholder="File path">
+          <div id="layer-results"></div>
+          <table id="file-results" class="file-list">
+            <caption>Merged filesystem entries</caption>
+            <thead>
+              <tr>
+                <th scope="col">Path</th>
+                <th scope="col">Type</th>
+                <th scope="col">Size</th>
+                <th scope="col">Source</th>
+                <th scope="col">Status</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody id="file-results-body"></tbody>
+          </table>
+          <div class="file-pagination">
+            <p id="file-limit" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+            <div class="scan-actions">
+              <button id="files-previous" class="secondary">Previous</button>
+              <button id="files-next" class="secondary">Next</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
