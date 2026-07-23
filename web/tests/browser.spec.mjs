@@ -12,7 +12,7 @@ test.beforeEach(async ({ page }) => {
     Object.defineProperty(globalThis, "showSaveFilePicker", { value: undefined });
   });
   await page.goto("/");
-  await expect(page.locator("#runtime-badge")).toHaveText("Web / CORS mode");
+  await expect(page.locator("#runtime-badge")).toBeHidden();
 });
 
 test.afterEach(async ({ page }) => {
@@ -117,7 +117,7 @@ test("groups package aliases and scans supported artifact layers after skipped p
 
 test("runs the self-contained proxyless build without external code assets", async ({ page, baseURL }) => {
   await page.goto("/dist/proxyless.html");
-  await expect(page.locator("#runtime-badge")).toHaveText("Web / CORS mode");
+  await expect(page.locator("#runtime-badge")).toBeHidden();
   const codeAssets = await page.evaluate(() => performance
     .getEntriesByType("resource")
     .map((entry) => entry.name)
