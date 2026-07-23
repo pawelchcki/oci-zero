@@ -1175,16 +1175,62 @@ function removePath(target) {
   }
 }
 
+const LAYER_STATUS_LABEL = {
+  pending: "not scanned",
+  scanning: "scanning",
+  verified: "verified",
+  skipped: "skipped",
+  failed: "failed",
+};
+
+function shortDigest(digest) {
+  const [algorithm, encoded = ""] = digest.split(":", 2);
+  return encoded.length > 12 ? `${algorithm}:${encoded.slice(0, 12)}…` : digest;
+}
+
 function renderLayers() {
-  clear($("layer-results"));
+  const container = $("layer-results");
+  clear(container);
   state.layerEvents.forEach((events, index) => {
     const status = state.layerStatus[index];
-    if (status === "pending") return;
-    const details = document.createElement("details");
-    details.className = "layer";
-    const summary = document.createElement("summary");
+    const digest = state.manifest.layers[index].digest;
+
+    const badge = document.createElement("span");
+    badge.className = "layer-badge";
+    badge.dataset.status = status;
+    badge.textContent = LAYER_STATUS_LABEL[status] || status;
+
+    const title = document.createElement("span");
+    title.className = "layer-title";
+    title.textContent = `Layer ${index + 1}`;
+
+    if (status === "pending") {
+      const row = document.createElement("div");
+      row.className = "layer layer-pending";
+      row.append(badge, title);
+      container.append(row);
+      return;
+    }
+
     const entries = events.filter((event) => event.type === "entry");
-    summary.textContent = `Layer ${index + 1} · ${status} · ${countLabel(entries.length, "entry", "entries")} · ${state.manifest.layers[index].digest}`;
+    // Keep "<status> · N entries" as one contiguous run for accessible-text assertions.
+    const meta = document.createElement("span");
+    meta.className = "layer-meta";
+    const noun = entries.length === 1 ? "entry" : "entries";
+    meta.append(badge, textNode(` · ${entries.length.toLocaleString()} ${noun}`));
+
+    const digestEl = document.createElement("code");
+    digestEl.className = "layer-digest";
+    digestEl.textContent = shortDigest(digest);
+    digestEl.title = digest;
+
+    const summary = document.createElement("summary");
+    summary.append(title, meta, digestEl);
+
+    const fullDigest = document.createElement("code");
+    fullDigest.className = "layer-full-digest";
+    fullDigest.textContent = digest;
+
     const body = document.createElement("div");
     body.className = "layer-entries";
     for (const entry of events.slice(0, 500)) {
@@ -1194,8 +1240,11 @@ function renderLayers() {
       body.append(line);
     }
     if (events.length > 500) body.append(textNode(`… ${events.length - 500} more events`));
-    details.append(summary, body);
-    $("layer-results").append(details);
+
+    const details = document.createElement("details");
+    details.className = "layer";
+    details.append(summary, fullDigest, body);
+    container.append(details);
   });
 }
 
