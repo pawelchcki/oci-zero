@@ -27,6 +27,8 @@ unpacking content from remote Open Container Initiative (OCI) registries.
   transactional layer sink with safe paths and OCI whiteout events.
 - Optionally decode gzip and Zstandard layers or use reqwless and MbedTLS,
   without adding a Rust allocator.
+- Build the core for WebAssembly and use the included browser/Chrome extension
+  example to browse catalogs, tags, metadata, layers, and merged filesystems.
 
 ## Features
 
@@ -170,6 +172,32 @@ Rust 1.91; the allocation-free core crate remains compatible with Rust 1.75.
 CI builds and runs this binary against the pinned HTTPS blob, so the network,
 certificate verification, fixed TLS arena, decoder, digest checks, tar parser,
 and extraction path are exercised together.
+
+## Browser and Chrome extension
+
+The [`web`](web/README.md) workspace crate builds `oci-zero`, gzip, and
+Zstandard support for `wasm32-unknown-unknown`. Its shared `index.html` can be
+served as an ordinary CORS-limited page or loaded as an unpacked Manifest V3
+Chrome extension. Web mode talks to registries directly and can reach registries
+that omit browser CORS headers when opened in a CORS-disabled Chrome profile,
+while extension mode requests per-origin access directly from Chrome.
+
+The example includes quick links for Docker Hub, GHCR, Quay, Kubernetes, ECR
+Public, Microsoft Container Registry, `install.datadoghq.com`, and
+`installtesting.datad0g.com`, plus the public repositories exercised by this
+project. It lists paginated catalogs and tags, resolves platform manifests,
+shows raw and structured metadata, applies verified layer whiteouts into a
+merged filesystem, streams file listings through a background worker, extracts
+individual files, and exports a selected platform as either an OCI image layout
+or Docker-loadable archive.
+
+```console
+web/build.sh
+cd web && npm run build:proxyless
+```
+
+See the web README for the CORS-disabled Chrome launch command, Chrome's
+**Load unpacked** workflow, and the example's explicit browser memory limits.
 
 ## End-to-end overhead
 
