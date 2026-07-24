@@ -603,10 +603,7 @@ pub fn basic_authorization<'buffer>(
         .get_mut(..PREFIX.len())
         .ok_or(RegistryError::BufferTooSmall)?
         .copy_from_slice(PREFIX);
-    loop {
-        let Some(first) = input.next() else {
-            break;
-        };
+    while let Some(first) = input.next() {
         let second = input.next();
         let third = input.next();
         let encoded = [
