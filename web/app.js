@@ -200,9 +200,14 @@ await initWasm();
 initializeUi();
 
 function initializeUi() {
-  $("runtime-badge").textContent = extensionMode
-    ? "Chrome extension"
-    : "Web / CORS mode";
+  const runtimeBadge = $("runtime-badge");
+  if (extensionMode) {
+    runtimeBadge.textContent = "Chrome extension";
+    runtimeBadge.classList.remove("hidden");
+  } else {
+    runtimeBadge.textContent = "";
+    runtimeBadge.classList.add("hidden");
+  }
   renderPresets();
 
   $("repository-form").addEventListener("submit", (event) => {
