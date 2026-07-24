@@ -104,8 +104,23 @@ impl SplitMix64 {
     }
 }
 
+/// Base seed for the generated corpus.
+///
+/// Overridable so a scheduled run can explore a different corpus than the fixed
+/// one CI replays on every push; a failing nightly reports its seed, and setting
+/// this variable to that value reproduces the run exactly.
+fn configured_base_seed() -> u64 {
+    match std::env::var("ZSTD_ZERO_CROSSCHECK_SEED") {
+        Ok(value) => value.parse::<u64>().unwrap_or_else(|error| {
+            panic!("ZSTD_ZERO_CROSSCHECK_SEED must be an unsigned 64-bit integer: {error}")
+        }),
+        Err(std::env::VarError::NotPresent) => BASE_SEED,
+        Err(error) => panic!("cannot read ZSTD_ZERO_CROSSCHECK_SEED: {error}"),
+    }
+}
+
 fn case_seed(number: usize) -> u64 {
-    BASE_SEED ^ (number as u64).wrapping_mul(0xd134_2543_de82_ef95)
+    configured_base_seed() ^ (number as u64).wrapping_mul(0xd134_2543_de82_ef95)
 }
 
 fn target_sizes() -> Vec<usize> {

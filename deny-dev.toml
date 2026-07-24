@@ -1,0 +1,26 @@
+# cargo-deny configuration including dev-dependencies.
+#
+# Run non-blocking in CI so advisories in the test-only stack stay visible
+# without failing builds for issues that cannot currently be fixed.
+#
+# As of the last review every finding here comes from the pinned test HTTP
+# stack -- ureq 2.9.7 -> {rustls 0.22 -> rustls-webpki 0.102, url 2.4.1 -> idna
+# 0.4} -- which exists only to fetch public registry fixtures in tests:
+#
+#   RUSTSEC-2024-0421  idna            Punycode labels decoding to pure ASCII
+#   RUSTSEC-2026-0049  rustls-webpki   CRL distribution-point matching
+#   RUSTSEC-2026-0098  rustls-webpki   URI name constraints accepted
+#   RUSTSEC-2026-0099  rustls-webpki   wildcard name constraints accepted
+#   RUSTSEC-2026-0104  rustls-webpki   panic parsing CRLs
+#
+# None are reachable from the published crates, and the fixes require
+# rustls-webpki >=0.103, which needs a newer ureq than the Rust 1.75 MSRV
+# allows. Revisit when the MSRV rises.
+
+[advisories]
+version = 2
+ignore = []
+
+[graph]
+exclude-dev = false
+all-features = true

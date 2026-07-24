@@ -1,0 +1,59 @@
+name: Nightly differential
+
+# The per-push differential suites replay a fixed 256-case corpus derived from a
+# constant seed, so they never explore new input. This job runs a much larger
+# corpus from a seed that changes every run. The seed is echoed into the log:
+# re-run with that value via workflow_dispatch to reproduce a failure exactly.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: Number of generated cases per crate
+        required: false
+        default: "25000"
+      seed:
+        description: Base seed (defaults to the run id)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-differential
+  cancel-in-progress: false
+
+jobs:
+  crosscheck:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: gzip-zero
+            cases_var: GZIP_ZERO_CROSSCHECK_CASES
+            seed_var: GZIP_ZERO_CROSSCHECK_SEED
+          - crate: zstd-zero
+            cases_var: ZSTD_ZERO_CROSSCHECK_CASES
+            seed_var: ZSTD_ZERO_CROSSCHECK_SEED
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - name: Cross-check ${{ matrix.crate }} against the reference decoder
+        env:
+          CASES: ${{ inputs.cases || '25000' }}
+          SEED: ${{ inputs.seed || github.run_id }}
+        run: |
+          echo "::notice::${{ matrix.crate }} corpus: cases=$CASES seed=$SEED"
+          echo "Reproduce locally with:"
+          echo "  ${{ matrix.cases_var }}=$CASES ${{ matrix.seed_var }}=$SEED \\"
+          echo "  cargo test -p ${{ matrix.crate }} --release --test differential"
+          export ${{ matrix.cases_var }}="$CASES"
+          export ${{ matrix.seed_var }}="$SEED"
+          cargo test -p ${{ matrix.crate }} --release --test differential -- --nocapture
