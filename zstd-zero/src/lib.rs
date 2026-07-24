@@ -125,6 +125,35 @@ pub struct DecoderBuffers<'a> {
     pub literals: &'a mut [u8],
 }
 
+/// Tuning knobs for a [`Decoder`].
+///
+/// [`Default`] enables every validation check; prefer it unless you have a
+/// specific reason not to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecoderOptions {
+    /// Reject Huffman literal streams that do not end exactly on their final bit.
+    ///
+    /// Enabled by default. Disabling it makes the decoder tolerate a truncated
+    /// literal bitstream by padding the remaining symbols instead of failing,
+    /// which is only useful for best-effort salvage of damaged data.
+    ///
+    /// # Warning
+    ///
+    /// With this disabled, a corrupt frame can decode "successfully" to bytes
+    /// that differ from what other zstd implementations produce, with no error
+    /// reported. Never disable it for content-addressed or otherwise
+    /// security-sensitive input.
+    pub strict_literal_bitstream: bool,
+}
+
+impl Default for DecoderOptions {
+    fn default() -> Self {
+        Self {
+            strict_literal_bitstream: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum State {
     Header,
@@ -159,6 +188,7 @@ enum BlockKind {
 }
 
 pub struct Decoder<'a> {
+    options: DecoderOptions,
     history: &'a mut [u8],
     block: &'a mut [u8],
     literals: &'a mut [u8],
@@ -185,8 +215,15 @@ pub struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
+    /// Create a decoder with every validation check enabled.
     pub fn new(buffers: DecoderBuffers<'a>) -> Self {
+        Self::with_options(buffers, DecoderOptions::default())
+    }
+
+    /// Create a decoder with explicit [`DecoderOptions`].
+    pub fn with_options(buffers: DecoderBuffers<'a>, options: DecoderOptions) -> Self {
         Self {
+            options,
             history: buffers.history,
             block: buffers.block,
             literals: buffers.literals,
@@ -567,6 +604,7 @@ impl<'a> Decoder<'a> {
             self.literals,
             &mut self.huffman,
             self.block_limit,
+            self.options.strict_literal_bitstream,
         )?;
         let sequence_input = &self.block[consumed..size];
         let (sequence_count, mut position) = parse_sequence_count(sequence_input)?;
@@ -871,6 +909,7 @@ fn decode_literals(
     output: &mut [u8],
     table: &mut HuffmanTable,
     block_limit: usize,
+    strict: bool,
 ) -> Result<(usize, usize), DecodeError> {
     let first = *input.first().ok_or(DecodeError::InvalidBlock)?;
     let kind = first & 3;
@@ -961,9 +1000,9 @@ fn decode_literals(
             return Err(DecodeError::InvalidEntropyTable);
         }
         if streams == 1 {
-            table.decode(encoded, &mut output[..regenerated])?;
+            table.decode(encoded, &mut output[..regenerated], strict)?;
         } else {
-            table.decode_four(encoded, &mut output[..regenerated])?;
+            table.decode_four(encoded, &mut output[..regenerated], strict)?;
         }
         Ok((regenerated, end))
     }

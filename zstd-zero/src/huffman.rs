@@ -60,7 +60,12 @@ impl Table {
         Ok(consumed)
     }
 
-    pub(crate) fn decode(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecodeError> {
+    pub(crate) fn decode(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        strict: bool,
+    ) -> Result<(), DecodeError> {
         if !self.valid {
             return Err(DecodeError::InvalidEntropyTable);
         }
@@ -71,8 +76,16 @@ impl Table {
             if entry.bits == 0 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            let consumed = core::cmp::min(entry.bits as usize, bits.remaining()) as u8;
-            bits.consume(consumed)?;
+            if strict {
+                // A short read must fail here. Clamping to the bits that remain would
+                // drive `remaining` to exactly 0, making the end-of-stream check below
+                // vacuous, and every remaining literal would then be decoded from an
+                // all-zero peek — silently emitting `entries[0]` instead of erroring.
+                bits.consume(entry.bits)?;
+            } else {
+                let consumed = core::cmp::min(entry.bits as usize, bits.remaining()) as u8;
+                bits.consume(consumed)?;
+            }
             *byte = entry.symbol;
         }
         if bits.remaining() != 0 {
@@ -81,7 +94,12 @@ impl Table {
         Ok(())
     }
 
-    pub(crate) fn decode_four(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecodeError> {
+    pub(crate) fn decode_four(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        strict: bool,
+    ) -> Result<(), DecodeError> {
         if input.len() < 6 {
             return Err(DecodeError::InvalidBitstream);
         }
@@ -117,6 +135,7 @@ impl Table {
                 self.decode(
                     &input[starts[stream]..ends[stream]],
                     &mut output[output_start..output_end],
+                    strict,
                 )?;
             }
         }
