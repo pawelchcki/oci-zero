@@ -219,6 +219,7 @@ function initializeUi() {
     runWithPermissions(() => openCatalog($("registry-input").value, true));
   });
   $("permission-button").addEventListener("click", grantPendingPermission);
+  $("log-clear").addEventListener("click", () => clear($("log-entries")));
   $("catalog-more").addEventListener("click", () => runWithPermissions(loadMoreCatalog));
   $("tags-more").addEventListener("click", () => runWithPermissions(loadMoreTags));
   $("catalog-search-all").addEventListener("click", () => runWithPermissions(searchRemainingCatalog));
@@ -1546,10 +1547,38 @@ function formatBytes(value) {
 
 function setStatus(message, error = false) {
   const status = $("status");
-  status.textContent = error && !/^Error:\s/i.test(message) ? `Error: ${message}` : message;
+  const text = error && !/^Error:\s/i.test(message) ? `Error: ${message}` : message;
+  status.textContent = text;
   status.classList.toggle("error", error);
   status.setAttribute("role", error ? "alert" : "status");
   status.setAttribute("aria-live", error ? "assertive" : "polite");
+  appendLogEntry(text, error);
+}
+
+const LOG_LIMIT = 200;
+
+function appendLogEntry(message, error) {
+  const list = $("log-entries");
+  if (!list) return;
+  const last = list.lastElementChild;
+  if (last && last.dataset.message === message) return;
+
+  const entry = document.createElement("li");
+  entry.className = error ? "log-entry error" : "log-entry";
+  entry.dataset.message = message;
+
+  const time = document.createElement("time");
+  const now = new Date();
+  time.dateTime = now.toISOString();
+  time.textContent = now.toLocaleTimeString();
+
+  const body = document.createElement("span");
+  body.textContent = message;
+
+  entry.append(time, body);
+  list.append(entry);
+  while (list.childElementCount > LOG_LIMIT) list.removeChild(list.firstElementChild);
+  list.scrollTop = list.scrollHeight;
 }
 
 function resetSelection() {

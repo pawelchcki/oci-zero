@@ -96,7 +96,6 @@
           <span id="permission-message"></span>
           <button id="permission-button">Grant access</button>
         </div>
-        <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
 
         <section id="metadata-panel" class="panel hidden">
           <div class="panel-heading">
@@ -153,6 +152,18 @@
           </div>
         </section>
       </div>
+
+      <section class="activity" aria-label="Activity">
+        <div class="activity-bar">
+          <p class="eyebrow">Activity</p>
+          <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
+          <button id="log-clear" class="secondary" type="button" aria-label="Clear activity log">Clear log</button>
+        </div>
+        <details id="log-drawer" class="log-drawer">
+          <summary>Activity log</summary>
+          <ol id="log-entries" class="log-entries" role="log" aria-live="off" aria-label="Activity log history"></ol>
+        </details>
+      </section>
     </main>
 
     <script type="module" src="app.js"></script>
