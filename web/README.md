@@ -133,10 +133,13 @@ the CORS-disabled Chrome profile shown above.
 
 ## GitHub Pages
 
+The current build is published at <https://pawelchcki.github.io/oci-zero/>.
+
 The `.github/workflows/pages.yml` workflow builds the WebAssembly package and the
 self-contained page, then publishes it to GitHub Pages on every push to `main`
-that touches `web/` (and on manual dispatch). It runs after Pages is enabled for
-the repository with **Build and deployment → Source: GitHub Actions**.
+that touches `web/` or the workflow itself (and on manual dispatch). It runs
+after Pages is enabled for the repository with **Build and deployment → Source:
+GitHub Actions**.
 
 Because the hosted page is a normal HTTPS origin, registry access there only
 works for registries that expose browser CORS headers. For registries that do

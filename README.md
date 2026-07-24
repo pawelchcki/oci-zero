@@ -11,6 +11,19 @@ unpacking content from remote Open Container Initiative (OCI) registries.
 > **Experimental:** The allocation-free APIs are usable but remain subject to
 > change while the registry and layer conformance suites grow.
 
+```toml
+[dependencies]
+oci-zero = "0.1"
+```
+
+The default feature set is empty, so this pulls in only `sha2` and stays
+`no_std`. Add the decoders and transport you need — see [Features](#features):
+
+```toml
+[dependencies]
+oci-zero = { version = "0.1", features = ["gzip", "zstd"] }
+```
+
 ## Capabilities
 
 - Remain `no_std` and allocation-free by default.
@@ -175,6 +188,11 @@ and extraction path are exercised together.
 
 ## Browser and Chrome extension
 
+A hosted build is published at
+<https://pawelchcki.github.io/oci-zero/>. Because that is an ordinary HTTPS
+origin, it can only reach registries that expose browser CORS headers; the
+extension and CORS-disabled profile below cover the rest.
+
 The [`web`](web/README.md) workspace crate builds `oci-zero`, gzip, and
 Zstandard support for `wasm32-unknown-unknown`. Its shared `index.html` can be
 served as an ordinary CORS-limited page or loaded as an unpacked Manifest V3
@@ -216,6 +234,11 @@ bench/e2e-overhead.sh --fixture ghcr-256m-w256k
 See [bench/README.md](bench/README.md) for profiler requirements, metric
 semantics, the optional hardware instruction counter, and the manual GitHub
 Actions workflow available to macOS users.
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) for the PR title convention, which is enforced in CI
+because it drives version bumps and changelogs, and for how releases are cut.
 
 ## License
 

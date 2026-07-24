@@ -1,7 +1,18 @@
 # zstd-zero
 
+[![crates.io](https://img.shields.io/crates/v/zstd-zero.svg)](https://crates.io/crates/zstd-zero)
+[![docs.rs](https://docs.rs/zstd-zero/badge.svg)](https://docs.rs/zstd-zero)
+
 `zstd-zero` is an experimental, safe Rust decoder for standard Zstandard
 frames. The crate is `no_std`, has no dependencies, and never allocates.
+
+It requires Rust 1.75 or newer and contains no unsafe code
+(`#![forbid(unsafe_code)]`).
+
+```toml
+[dependencies]
+zstd-zero = "0.1"
+```
 
 The caller supplies three reusable buffers:
 
@@ -43,6 +54,8 @@ transactional sink.
 The crate is published separately so applications can use the decoder without
 depending on OCI registry functionality.
 
+## Testing
+
 The test suite compares against libzstd across compression levels and input
 fragmentation patterns. The differential suite generates 256 deterministic
 frames across payload families, boundary sizes, compression levels and
@@ -56,6 +69,16 @@ frames. Increase or reduce the generated case count with
 ZSTD_ZERO_CROSSCHECK_CASES=1024 cargo test -p zstd-zero --test differential
 ```
 
+That corpus is derived from a fixed base seed, so every push replays the same
+256 frames. A nightly workflow runs a much larger corpus from a changing seed and
+prints the seed it used; `ZSTD_ZERO_CROSSCHECK_SEED` reproduces such a run
+exactly:
+
+```console
+ZSTD_ZERO_CROSSCHECK_CASES=25000 ZSTD_ZERO_CROSSCHECK_SEED=<seed> \
+  cargo test -p zstd-zero --release --test differential
+```
+
 CI also builds zstd 1.5.7's official `decodecorpus` generator and checks 256
 deterministic no-dictionary frames. The same check can be run locally with:
 
@@ -63,3 +86,5 @@ deterministic no-dictionary frames. The same check can be run locally with:
 DECODECORPUS=/path/to/decodecorpus cargo test -p zstd-zero \
   --test conformance decodes_official_decodecorpus_frames -- --ignored
 ```
+
+Licensed under either Apache-2.0 or MIT, at your option.
