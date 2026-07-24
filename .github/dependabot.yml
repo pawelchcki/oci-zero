@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  # Every workflow pins its actions by commit SHA, which is the right supply-chain
+  # posture but means nothing ever updates them -- a SHA never "floats" to pick up
+  # a security fix. Dependabot rewrites the SHA and the trailing `# vX.Y.Z` comment
+  # together, so the pins stay both current and auditable.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR for all actions rather than one per action; these bumps are reviewed
+    # as a batch anyway.
+    groups:
+      actions:
+        patterns: ["*"]
+    # `.github/workflows/pr-title.yml` is a required status check, so a PR whose
+    # title is not a Conventional Commit cannot merge. Dependabot's default
+    # "Bump x from a to b" would fail it; this makes titles read
+    # "ci: bump the actions group ...".
+    commit-message:
+      prefix: ci
+
+# The cargo ecosystem is deliberately absent. `ureq`, `url` and `zeroize` are
+# `=`-pinned in the manifests specifically to hold the Rust 1.75 MSRV that the
+# `Rust 1.75 / no_std` job gates on, so Dependabot would open PRs that break that
+# job by design. Revisit when the MSRV rises.

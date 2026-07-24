@@ -22,15 +22,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
       - name: Install profilers
         run: sudo apt-get update && sudo apt-get install --yes time valgrind
       - name: Run end-to-end harness
         run: bench/e2e-overhead.sh --fixture '${{ inputs.fixture }}'
       - name: Upload measurements
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-overhead-${{ inputs.fixture }}-${{ runner.arch }}-callgrind
           path: target/e2e-overhead/

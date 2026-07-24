@@ -45,7 +45,9 @@ publish a new `oci-zero`.
 ### Scopes
 
 Prefer a crate name as the scope so changelogs attribute correctly:
-`oci-zero`, `gzip-zero`, `zstd-zero`. Example: `fix(gzip-zero): reject trailer with wrong ISIZE`.
+`oci-zero`, `gzip-zero`, `zstd-zero`, `oci-zero-web`, `oci-zero-no-std-extract`.
+Example: `fix(gzip-zero): reject trailer with wrong ISIZE`. Any other scope is
+rejected, so leave the scope off rather than inventing one.
 
 ### Examples
 
@@ -59,6 +61,24 @@ feat(oci-zero)!: rename Decoder::decode to Decoder::step
 ```
 
 PR titles are enforced in CI by `.github/workflows/pr-title.yml`.
+
+## Merging
+
+These are GitHub repository settings rather than files, so they are recorded here:
+
+- **Squash is the only merge method.** Merge commits and rebase merging are
+  disabled. This is what makes the claim above true — the squash commit takes its
+  subject from the **PR title** (`PR_TITLE`) and its body from the **PR
+  description** (`PR_BODY`), never from the branch's own commit messages.
+- **Auto-merge is enabled.** Turn it on for a PR and it lands once the required
+  checks pass.
+- `main` requires `Stable Rust`, `Advisories`, `Rust 1.75 / no_std` and
+  `Conventional Commits` to pass, requires linear history, requires review
+  conversations to be resolved, and rejects force-pushes and deletion.
+
+Because the Conventional Commits check is *required*, any bot that opens PRs here
+must produce a conforming title — see the `commit-message.prefix` note in
+`.github/dependabot.yml`.
 
 ## Releasing
 
