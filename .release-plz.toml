@@ -1,0 +1,30 @@
+# Release policy for release-plz.
+#
+# By default release-plz bumps a package whenever *any* commit touches its
+# files. That is wrong for this workspace: the root package `oci-zero` owns the
+# repository root, so `.github/`, `AGENTS.md` and `deny.toml` all count as
+# changes to it, and every CI tweak would publish a new oci-zero. It also meant
+# a test-only commit bumped gzip-zero and zstd-zero.
+#
+# Releases are therefore driven by commit type, matching the table in AGENTS.md.
+
+[workspace]
+# Cut a release only when something user-visible changed. Matches `feat:`,
+# `fix(scope):` and `perf!:` alike.
+release_commits = "^(feat|fix|perf)[(!:]"
+
+[changelog]
+# `release_commits` gates releases but does not filter changelogs, so internal
+# commit types are skipped here as well. Without this, a release triggered by a
+# single fix would still list every ci/chore/test commit since the last tag.
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+  { message = "^chore", skip = true },
+]

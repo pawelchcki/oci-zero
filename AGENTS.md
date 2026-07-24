@@ -26,14 +26,21 @@ title produces a wrong version bump and a bad changelog entry.
 | `feat`     | New user-facing capability                | minor bump               |
 | `fix`      | Bug fix                                    | patch bump               |
 | `perf`     | Performance improvement                   | patch bump               |
-| `refactor` | Behaviour-preserving code change          | patch bump               |
-| `docs`     | Documentation only                        | no release               |
+| `refactor` | Behaviour-preserving code change          | no release, in changelog |
+| `docs`     | Documentation only                        | no release, in changelog |
 | `test`     | Tests only                                | no release               |
 | `ci`       | CI / workflow changes                     | no release               |
 | `build`    | Build system or dependency changes        | no release               |
 | `chore`    | Maintenance not covered above             | no release               |
 
 A `feat!:` / `fix!:` (or `BREAKING CHANGE:` footer) triggers a breaking bump.
+
+This table is enforced by `.release-plz.toml`, not merely a convention:
+`release_commits` restricts releases to `feat`/`fix`/`perf`, and `commit_parsers`
+keeps the purely internal types out of changelogs. Without that config
+release-plz bumps a package for *any* commit touching its files — and because
+the root package `oci-zero` owns the repository root, a CI-only change would
+publish a new `oci-zero`.
 
 ### Scopes
 
