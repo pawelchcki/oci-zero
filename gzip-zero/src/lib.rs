@@ -368,6 +368,10 @@ impl<'a> Decoder<'a> {
                     );
                     position += consumed;
                     let end = start + written;
+                    // miniz never wraps within a single call, so `history[start..end]`
+                    // is contiguous and in bounds. `output_position` below preserves
+                    // `start < len`, which also guarantees at least one free byte.
+                    debug_assert!(end <= self.history.len());
                     self.data_crc = crc32_update(self.data_crc, &self.history[start..end]);
                     self.data_size = self.data_size.wrapping_add(written as u32);
                     self.output_position = if end == self.history.len() { 0 } else { end };
@@ -388,7 +392,12 @@ impl<'a> Decoder<'a> {
                         TINFLStatus::NeedsMoreInput => {
                             return Ok(InternalStep::NeedInput { consumed: position });
                         }
+                        // Unreachable: `start < len` leaves a free byte, so a full
+                        // output buffer always comes with `written != 0`, handled
+                        // above. Kept as an error rather than a panic so a future
+                        // regression cannot crash on untrusted input.
                         TINFLStatus::HasMoreOutput => {
+                            debug_assert!(false, "HasMoreOutput with written == 0");
                             return Err(DecodeError::InvalidDeflateStream);
                         }
                         _ => unreachable!(),
@@ -474,6 +483,14 @@ impl<'a> Decoder<'a> {
 
     fn start_deflate(&mut self) {
         self.decompressor.init();
+        // Load-bearing for cross-member isolation; do not remove as an optimization.
+        //
+        // `history` doubles as miniz's wrapping output window, so a malformed member
+        // whose DEFLATE stream back-references before its own output resolves that
+        // distance against whatever the ring still holds. miniz does not reject
+        // out-of-range distances in wrapping mode — it masks them — so without this
+        // zeroing the previous member's plaintext is emitted as this member's output.
+        // Covered by `tests/invariants.rs`.
         self.history.fill(0);
         self.data_crc = !0;
         self.data_size = 0;
