@@ -12,23 +12,32 @@ Install [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/) and run:
 web/build.sh
 ```
 
-For ordinary browser mode without installing an extension, build and start the
-containerized server in the background:
+For ordinary browser mode without installing an extension, build the
+self-contained page (see [Proxyless single-file build](#proxyless-single-file-build)
+below) and open it in a dedicated, CORS-disabled Chrome profile:
 
 ```console
-web/serve.sh
+open -na "Google Chrome" --args \
+  --user-data-dir=/tmp/chrome-no-cors \
+  --disable-web-security \
+  --app="file://$PWD/dist/proxyless.html"
 ```
 
-The helper opens <http://localhost:8000>. Set `OCI_ZERO_WEB_PORT` to use another
-host port or `NO_OPEN=1` to leave the browser closed. Stop the server with:
+`--user-data-dir` keeps the relaxed profile isolated from your normal browser,
+`--disable-web-security` lets the page fetch registries that omit CORS headers,
+and `--app` opens it as a standalone window. Point `--app` at any URL that hosts
+the page — for example a private Chonk object:
 
 ```console
-docker compose --file web/docker-compose.yml down
+open -na "Google Chrome" --args \
+  --user-data-dir=/tmp/chrome-no-cors \
+  --disable-web-security \
+  --app="https://chonk.us1.prod.dog/v2/get/chonk-uploads-prod/proxyless/<object-id>"
 ```
 
-The container includes a loopback-only, token-protected proxy for registry and
-anonymous token-service requests, so this mode does not depend on registry CORS
-headers. It does not forward browser cookies or Docker credentials.
+This mode talks to registries directly. It sends eligible existing browser
+cookies but does not read, store, or request registry credentials. Only use the
+CORS-disabled profile for this page.
 
 ## Load the Chrome extension
 
@@ -48,11 +57,25 @@ origins one at a time. It sends eligible existing browser cookies but does not
 read, store, or request registry credentials. The manifest deliberately has no
 content scripts and no `cookies` permission.
 
-The explorer groups catalog repositories by namespace and groups tags whose
-resolved manifest bytes have the same digest. A group's immutable version is its
-title; moving aliases such as `latest` are shown as chips. Both repository and
-version searches cover the currently loaded pages (use **Load more** to extend
-them).
+The explorer presents catalog repositories as a flat, virtualized path list.
+Repository and tag filters search only pages already loaded in the browser and
+report that boundary explicitly. **Load more** fetches one page. With a non-empty
+filter, **Search remaining pages** follows pagination sequentially until it is
+finished or cancelled; progress and partial results are retained if a request
+fails or the registry repeats a pagination cursor.
+
+Tags appear as soon as each tag-name page arrives. Manifest digests are resolved
+with at most four concurrent requests only when rows enter the visible virtual
+window (including its small overscan area), then equal digests are progressively
+combined into alias groups. Until all loaded tags have been visited, digest
+filtering and alias grouping are explicitly partial. A deep tag search loads tag
+names but does not eagerly resolve every discovered manifest, and changing
+repositories cancels obsolete manifest work.
+
+The Distribution registry API has no portable server-side substring search or
+portable total-count response. Consequently, an empty result applies to loaded
+pages unless an explicit deep search has completed, and the UI never claims a
+registry-wide total that the registry did not provide.
 
 **Scan files** streams each supported archive layer through a dedicated worker and shows provisional
 filesystem entries while the layer is still downloading. File payload blocks are
@@ -76,8 +99,10 @@ limited to 200,000 entries and Zstandard windows to 256 MiB.
 
 The Playwright suite runs the real page, worker, and WebAssembly module against
 a deterministic local OCI registry fixture. It covers catalog and manifest
-browsing, provisional-to-verified streamed listings, filtering, file download,
-and rollback after an integrity failure.
+browsing, virtualized large lists, progressive tag resolution, deep-search
+pagination and cancellation, 250-row file pagination, provisional-to-verified
+streamed listings, filtering, file download, and rollback after an integrity
+failure.
 
 Build the WebAssembly package, install the test dependency, and run the suite:
 
@@ -93,12 +118,13 @@ The configuration uses an installed Chrome or Chromium when available. Set
 `npx playwright install chromium` to install Playwright's browser.
 
 An optional live package check can be enabled with `OCI_ZERO_LIVE_E2E=1`; it is
-intended for environments that run the browser through the local proxy and may
-follow Datadog's moving `agent-package:latest` tag.
+intended for environments that run the browser with CORS disabled against a live
+registry and may follow Datadog's moving `agent-package:latest` tag. Point it at
+a running instance with `OCI_ZERO_LIVE_BASE_URL`.
 
 ## Proxyless single-file build
 
-To publish the browser without its local proxy or separate static assets, build
+To publish the browser as a single file with no separate static assets, build
 the self-contained HTML artifact after `web/build.sh`:
 
 ```console
@@ -108,5 +134,18 @@ npm run build:proxyless
 
 The result is `web/dist/proxyless.html`; it embeds the stylesheet, application,
 scan worker, and WebAssembly module so it can be hosted as one private Chonk
-object. Registry access still depends on the target registry's browser CORS
-policy.
+object or opened directly from disk. Registry access depends on the target
+registry's browser CORS policy, so open it either in the Chrome extension or in
+the CORS-disabled Chrome profile shown above.
+
+## GitHub Pages
+
+The `.github/workflows/pages.yml` workflow builds the WebAssembly package and the
+self-contained page, then publishes it to GitHub Pages on every push to `main`
+that touches `web/` (and on manual dispatch). It runs after Pages is enabled for
+the repository with **Build and deployment → Source: GitHub Actions**.
+
+Because the hosted page is a normal HTTPS origin, registry access there only
+works for registries that expose browser CORS headers. For registries that do
+not, download `index.html` and open it in the CORS-disabled Chrome profile or use
+the Chrome extension.

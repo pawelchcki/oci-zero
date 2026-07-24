@@ -28,7 +28,6 @@ test("browses a catalog, repository, and image manifest", async ({ page, baseURL
   await page.locator("#registry-input").fill(baseURL);
   await page.getByRole("button", { name: "Open catalog" }).click();
   await expect(status).toHaveText(`Loaded 2 repositories from ${new URL(baseURL).host}.`);
-  await page.locator("#catalog-results summary", { hasText: "demo" }).click();
   await page.getByRole("button", { name: "Open repository demo/image" }).click();
 
   await expect(page.locator("#repository-name")).toHaveText(`${new URL(baseURL).host}/demo/image`);
@@ -162,39 +161,6 @@ test("keeps populated results usable within laptop and phone viewports", async (
   }
 });
 
-test("recovers when the local proxy token rotates", async ({ page, baseURL }) => {
-  let currentToken = "initial-token";
-  let tokenRequests = 0;
-  await page.route("**/proxy-token", async (route) => {
-    tokenRequests += 1;
-    await route.fulfill({ status: 200, contentType: "text/plain", body: currentToken });
-  });
-  await page.route("**/proxy?url=*", async (route) => {
-    if (route.request().headers()["x-oci-zero-proxy"] !== currentToken) {
-      await route.fulfill({
-        status: 403,
-        contentType: "text/plain",
-        headers: { "X-OCI-Zero-Proxy-Error": "invalid-token" },
-        body: "Invalid proxy token\n",
-      });
-      return;
-    }
-    const target = new URL(route.request().url()).searchParams.get("url");
-    await route.fulfill({ response: await route.fetch({ url: target }) });
-  });
-
-  await page.goto("/");
-  await expect(page.locator("#runtime-badge")).toHaveText("Local proxy");
-  await page.locator("#repository-input").fill(`${baseURL}/demo/image`);
-  await page.getByRole("button", { name: "Browse tags" }).click();
-  await expect(page.locator("#status")).toHaveText("Loaded 3 tags for demo/image.");
-
-  currentToken = "rotated-token";
-  await page.getByRole("button", { name: "Open version latest" }).click();
-  await expect(page.locator("#status")).toHaveText("Ready: 1 verified image layer.");
-  expect(tokenRequests).toBe(2);
-});
-
 test("selects each platform from an OCI index", async ({ page, baseURL }) => {
   await openImage(page, baseURL, "multi", { index: true });
   await expect(page.locator("#status")).toHaveText("Select one of 2 platform manifests.");
@@ -295,20 +261,143 @@ test("loads additional catalog and tag pages with deduplication", async ({ page,
   await expect(page.locator("#status")).toContainText("Loaded 2 repositories");
   await page.getByRole("button", { name: "Load more repositories" }).click();
   await expect(page.locator("#status")).toContainText("Loaded 3 repositories");
-  await page.locator("#catalog-results summary", { hasText: "packages" }).click();
-  await page.locator("#catalog-results summary", { hasText: "datadog" }).click();
   await expect(page.getByRole("button", { name: "Open repository packages/datadog/agent" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Load more repositories" })).toBeHidden();
 
   await page.locator("#repository-input").fill(`${baseURL}/demo/image`);
   await page.getByRole("button", { name: "Browse tags" }).click();
-  await expect(page.locator("#tag-limit")).toHaveText("3 matching tags.");
+  await expect(page.locator("#tag-limit")).toContainText("3 matching groups across 3 loaded tags.");
   await page.getByRole("button", { name: "Load more tags" }).click();
   await expect(page.locator("#status")).toHaveText("Loaded 5 tags for demo/image.");
   await expect(page.locator(".version-group")).toHaveCount(5);
   await expect(page.getByRole("button", { name: "Open version overlay" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Load more tags" })).toBeHidden();
-  await expect(page.locator("#tag-limit")).toHaveText("5 matching tags.");
+  await expect(page.locator("#tag-limit")).toContainText("5 matching groups across 5 loaded tags.");
+});
+
+test("virtualizes large loaded catalogs and tags while limiting manifest concurrency", async ({ page, baseURL }) => {
+  const repositories = Array.from({ length: 10_000 }, (_, index) => `namespace/repo-${String(index).padStart(5, "0")}`);
+  const tags = Array.from({ length: 10_000 }, (_, index) => `v${String(index).padStart(5, "0")}`);
+  let activeManifests = 0;
+  let maximumActiveManifests = 0;
+  let manifestRequests = 0;
+  await page.route("**/v2/_catalog?**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ repositories }),
+  }));
+  await page.route("**/v2/huge/tags/list?**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ name: "huge", tags }),
+  }));
+  await page.route("**/v2/huge/manifests/**", async (route) => {
+    manifestRequests += 1;
+    activeManifests += 1;
+    maximumActiveManifests = Math.max(maximumActiveManifests, activeManifests);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    activeManifests -= 1;
+    await route.fulfill({
+      contentType: "application/vnd.oci.image.manifest.v1+json",
+      body: JSON.stringify({ schemaVersion: 2, config: { digest: `sha256:${"0".repeat(64)}`, size: 0 }, layers: [] }),
+    });
+  });
+
+  await page.locator("#registry-input").fill(baseURL);
+  await page.getByRole("button", { name: "Open catalog" }).click();
+  expect(await page.locator("#catalog-results [role=listitem]").count()).toBeLessThan(100);
+  await page.locator("#catalog-filter").fill("repo-09999");
+  await expect(page.locator("#catalog-count")).toContainText("1 match in 10000 loaded repositories");
+  await expect(page.getByRole("button", { name: "Open repository namespace/repo-09999" })).toBeVisible();
+
+  await page.locator("#repository-input").fill(`${baseURL}/huge`);
+  await page.getByRole("button", { name: "Browse tags" }).click();
+  await expect(page.locator("#tag-limit")).toContainText("10000 loaded tags");
+  expect(await page.locator("#tag-results [role=listitem]").count()).toBeLessThan(100);
+  await expect(page.getByRole("button", { name: "Open version v09999" })).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(manifestRequests).toBeLessThan(100);
+  expect(maximumActiveManifests).toBeLessThanOrEqual(4);
+});
+
+test("deep catalog search follows pages and cancellation is a normal partial result", async ({ page, baseURL }) => {
+  await page.locator("#registry-input").fill(baseURL);
+  await page.getByRole("button", { name: "Open catalog" }).click();
+  await page.locator("#catalog-filter").fill("packages/datadog");
+  await expect(page.getByRole("button", { name: "Search remaining pages" })).toBeVisible();
+  await page.getByRole("button", { name: "Search remaining pages" }).click();
+  await expect(page.getByRole("button", { name: "Open repository packages/datadog/agent" })).toBeVisible();
+  await expect(page.locator("#catalog-progress")).toContainText("Search complete");
+
+  let pageNumber = 0;
+  await page.route("**/v2/_catalog?**", async (route) => {
+    pageNumber += 1;
+    if (pageNumber > 1) await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({
+      contentType: "application/json",
+      headers: { Link: `</v2/_catalog?n=100&last=${pageNumber}>; rel="next"` },
+      body: JSON.stringify({ repositories: [`partial/page-${pageNumber}`] }),
+    });
+  });
+  await page.getByRole("button", { name: "Open catalog" }).click();
+  await page.locator("#catalog-filter").fill("never-matches");
+  await expect(page.getByRole("button", { name: "Search remaining pages" })).toBeVisible();
+  await page.getByRole("button", { name: "Search remaining pages" }).click();
+  await expect(page.getByRole("button", { name: "Cancel search" })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel search" }).click();
+  await expect(page.locator("#catalog-progress")).toContainText("Search cancelled");
+  await expect(page.locator("#status")).not.toHaveClass(/error/);
+});
+
+test("deep tag search loads later names without hiding ordinary tag actions", async ({ page, baseURL }) => {
+  await page.locator("#repository-input").fill(`${baseURL}/demo/image`);
+  await page.getByRole("button", { name: "Browse tags" }).click();
+  await page.locator("#tag-filter").fill("overlay");
+  await expect(page.getByRole("button", { name: "Search remaining pages" })).toBeVisible();
+  await page.getByRole("button", { name: "Search remaining pages" }).click();
+  await expect(page.getByRole("button", { name: "Open version overlay" })).toBeVisible();
+  await expect(page.locator("#tags-progress")).toContainText("tag names loaded. Manifests were not fetched by the scan.");
+});
+
+test("preserves keyboard focus when progressive digest groups merge", async ({ page, baseURL }) => {
+  await page.route("**/v2/packages/datadog/agent/manifests/**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await route.continue();
+  });
+  await page.locator("#repository-input").fill(`${baseURL}/packages/datadog/agent`);
+  await page.getByRole("button", { name: "Browse tags" }).click();
+  await page.getByRole("button", { name: "Open version 7", exact: true }).focus();
+  await expect(page.locator(".version-group")).toHaveCount(1, { timeout: 5_000 });
+  expect(await page.evaluate(() => document.activeElement?.closest(".version-group")?.textContent)).toContain("7.81.1-1");
+});
+
+test("applies list sorting and system dark colors", async ({ page, baseURL }) => {
+  await page.locator("#registry-input").fill(baseURL);
+  await page.getByRole("button", { name: "Open catalog" }).click();
+  await page.locator("#catalog-sort").selectOption("name-desc");
+  await expect(page.locator("#catalog-results [role=listitem]").first()).toContainText("demo/nested/one");
+
+  await page.locator("#repository-input").fill(`${baseURL}/demo/image`);
+  await page.getByRole("button", { name: "Browse tags" }).click();
+  await page.locator("#tag-sort").selectOption("name-asc");
+  await expect(page.locator("#tag-results [role=listitem]").first().locator("strong")).toHaveText("corrupt");
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor)).toBe("rgb(21, 24, 29)");
+});
+
+test("paginates every matching file in 250-row pages", async ({ page, baseURL }) => {
+  await page.locator("#repository-input").fill(`${baseURL}/demo/many`);
+  await page.getByRole("button", { name: "Browse tags" }).click();
+  await page.getByRole("button", { name: "Open version latest" }).click();
+  await expect(page.locator("#status")).toContainText("Ready:");
+  await page.locator("#scan-files").click();
+  await expect(page.locator("#status")).toHaveText("Scanned 1 layer.", { timeout: 10_000 });
+  await expect(page.locator(".file-row")).toHaveCount(250);
+  await expect(page.locator("#file-limit")).toHaveText("Showing 1–250 of 600 matching entries.");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("#file-limit")).toHaveText("Showing 251–500 of 600 matching entries.");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator(".file-row")).toHaveCount(100);
+  await expect(page.locator("#file-limit")).toHaveText("Showing 501–600 of 600 matching entries.");
 });
 
 test("rolls back provisional rows after a declared layer size mismatch", async ({ page, baseURL }) => {
@@ -347,8 +436,8 @@ test("supports repository, version, scan, and download actions from the keyboard
 });
 
 test("live Datadog package extraction", async ({ page }) => {
-  test.skip(!process.env.OCI_ZERO_LIVE_E2E, "set OCI_ZERO_LIVE_E2E=1 to run against the local proxy");
-  const liveBaseUrl = process.env.OCI_ZERO_LIVE_BASE_URL || "http://127.0.0.1:8000";
+  test.skip(!process.env.OCI_ZERO_LIVE_E2E, "set OCI_ZERO_LIVE_E2E=1 to run against a live registry in a CORS-disabled browser");
+  const liveBaseUrl = process.env.OCI_ZERO_LIVE_BASE_URL || "http://127.0.0.1:8080";
   await page.goto(liveBaseUrl);
   await page.locator("#repository-input").fill("install.datadoghq.com/agent-package");
   await page.getByRole("button", { name: "Browse tags" }).click();

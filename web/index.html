@@ -40,8 +40,22 @@
             <h2>Repositories</h2>
             <button id="catalog-more" class="secondary hidden" aria-label="Load more repositories">Load more</button>
           </div>
-          <input id="catalog-filter" class="filter" placeholder="Search repositories">
-          <div id="catalog-results" class="repository-tree"></div>
+          <div class="control-grid">
+            <label for="catalog-filter">Filter loaded repositories</label>
+            <input id="catalog-filter" class="filter" placeholder="Repository path" autocomplete="off">
+            <label for="catalog-sort">Sort repositories</label>
+            <select id="catalog-sort">
+              <option value="name-asc">Name (A–Z)</option>
+              <option value="name-desc">Name (Z–A)</option>
+            </select>
+          </div>
+          <p id="catalog-count" class="muted live-count" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div class="scan-actions">
+            <button id="catalog-search-all" class="secondary hidden">Search remaining pages</button>
+            <button id="catalog-cancel-search" class="secondary hidden">Cancel search</button>
+          </div>
+          <p id="catalog-progress" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="catalog-results" class="virtual-list" aria-label="Loaded repositories"></div>
         </section>
 
         <section id="tags-panel" class="nav-panel hidden">
@@ -49,9 +63,23 @@
             <div><p class="eyebrow" id="repository-name"></p><h2>Versions</h2></div>
             <button id="tags-more" class="secondary hidden" aria-label="Load more tags">Load more</button>
           </div>
-          <input id="tag-filter" class="filter" placeholder="Search versions, aliases, or digests">
-          <div id="tag-results" class="version-list"></div>
-          <p id="tag-limit" class="muted"></p>
+          <div class="control-grid">
+            <label for="tag-filter">Filter loaded tags and resolved digests</label>
+            <input id="tag-filter" class="filter" placeholder="Tag name or resolved digest" autocomplete="off">
+            <label for="tag-sort">Sort tags</label>
+            <select id="tag-sort">
+              <option value="version-desc">Version (newest first)</option>
+              <option value="name-asc">Name (A–Z)</option>
+              <option value="name-desc">Name (Z–A)</option>
+            </select>
+          </div>
+          <p id="tag-limit" class="muted live-count" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div class="scan-actions">
+            <button id="tags-search-all" class="secondary hidden">Search remaining pages</button>
+            <button id="tags-cancel-search" class="secondary hidden">Cancel search</button>
+          </div>
+          <p id="tags-progress" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="tag-results" class="virtual-list tag-virtual-list" aria-label="Loaded tags"></div>
         </section>
 
         <details class="examples">
@@ -99,7 +127,8 @@
             <h2>Merged filesystem</h2>
             <span id="file-count" class="badge"></span>
           </div>
-          <input id="file-filter" class="filter" placeholder="Filter paths">
+          <label for="file-filter">Filter loaded file paths</label>
+          <input id="file-filter" class="filter" placeholder="File path">
           <div id="layer-results"></div>
           <table id="file-results" class="file-list">
             <caption>Merged filesystem entries</caption>
@@ -115,7 +144,13 @@
             </thead>
             <tbody id="file-results-body"></tbody>
           </table>
-          <p id="file-limit" class="muted"></p>
+          <div class="file-pagination">
+            <p id="file-limit" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+            <div class="scan-actions">
+              <button id="files-previous" class="secondary">Previous</button>
+              <button id="files-next" class="secondary">Next</button>
+            </div>
+          </div>
         </section>
       </div>
     </main>

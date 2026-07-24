@@ -41,6 +41,22 @@ const armManifest = imageManifest(armConfigDigest, armConfig.length, [{
 }]);
 const amdManifestDigest = digest(amdManifest);
 const armManifestDigest = digest(armManifest);
+const manyFilesLayer = tar(Array.from({ length: 600 }, (_, index) => [
+  `fixtures/file-${String(index).padStart(4, "0")}.txt`,
+  Buffer.from(`fixture ${index}\n`),
+]));
+const manyFilesLayerDigest = digest(manyFilesLayer);
+const manyFilesConfig = json({
+  architecture: "amd64",
+  os: "linux",
+  rootfs: { type: "layers", diff_ids: [manyFilesLayerDigest] },
+});
+const manyFilesConfigDigest = digest(manyFilesConfig);
+const manyFilesManifest = imageManifest(manyFilesConfigDigest, manyFilesConfig.length, [{
+  mediaType: "application/vnd.oci.image.layer.v1.tar",
+  digest: manyFilesLayerDigest,
+  size: manyFilesLayer.length,
+}]);
 const multiPlatformIndex = json({
   schemaVersion: 2,
   mediaType: "application/vnd.oci.image.index.v1+json",
@@ -101,7 +117,6 @@ const packageConfigDigest = digest(packageConfig);
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   if (url.pathname === "/healthz") return send(response, 200, "text/plain", Buffer.from("ok\n"));
-  if (url.pathname === "/proxy-token") return send(response, 404, "text/plain", Buffer.from("disabled\n"));
   if (url.pathname === "/v2/_catalog") {
     if (url.searchParams.has("last")) {
       return sendJson(response, { repositories: ["demo/nested/one", "packages/datadog/agent"] });
@@ -125,6 +140,9 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/v2/packages/datadog/agent/tags/list") {
     return sendJson(response, { name: "packages/datadog/agent", tags: ["latest", "7", "7.81", "7.81.1-1"] });
   }
+  if (url.pathname === "/v2/demo/many/tags/list") {
+    return sendJson(response, { name: "demo/many", tags: ["latest"] });
+  }
   if (url.pathname.startsWith("/v2/demo/image/manifests/")) {
     const selector = decodeURIComponent(url.pathname.split("/").at(-1));
     if (selector === "multi") {
@@ -144,6 +162,9 @@ const server = createServer(async (request, response) => {
   if (url.pathname.startsWith("/v2/packages/datadog/agent/manifests/")) {
     return send(response, 200, "application/vnd.oci.image.manifest.v1+json", packageManifest());
   }
+  if (url.pathname.startsWith("/v2/demo/many/manifests/")) {
+    return send(response, 200, "application/vnd.oci.image.manifest.v1+json", manyFilesManifest);
+  }
   if (url.pathname === `/v2/demo/image/blobs/${configDigest}`) {
     return send(response, 200, "application/vnd.oci.image.config.v1+json", config);
   }
@@ -152,6 +173,12 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === `/v2/demo/image/blobs/${overlayConfigDigest}`) {
     return send(response, 200, "application/vnd.oci.image.config.v1+json", overlayConfig);
+  }
+  if (url.pathname === `/v2/demo/many/blobs/${manyFilesConfigDigest}`) {
+    return send(response, 200, "application/vnd.oci.image.config.v1+json", manyFilesConfig);
+  }
+  if (url.pathname === `/v2/demo/many/blobs/${manyFilesLayerDigest}`) {
+    return send(response, 200, "application/vnd.oci.image.layer.v1.tar", manyFilesLayer);
   }
   if (url.pathname === `/v2/demo/image/blobs/${lowerLayerDigest}`) {
     return send(response, 200, "application/vnd.oci.image.layer.v1.tar", lowerLayer);

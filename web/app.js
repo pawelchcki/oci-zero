@@ -43,22 +43,6 @@ const metadataAccept = [
 ].join(", ");
 
 const extensionMode = Boolean(globalThis.chrome?.runtime?.id && chrome.permissions);
-let proxyTokenRefresh = null;
-
-async function requestProxyToken() {
-  try {
-    const response = await fetch("/proxy-token", { cache: "no-store", credentials: "same-origin" });
-    if (response.ok) return (await response.text()).trim() || null;
-  } catch (_) {
-    // A plain static server has no proxy endpoint.
-  }
-  return null;
-}
-
-let proxyToken = !extensionMode && ["http:", "https:"].includes(location.protocol)
-  ? await requestProxyToken()
-  : null;
-const proxyMode = !extensionMode && typeof proxyToken === "string" && proxyToken.length > 0;
 const encoder = new TextEncoder();
 const maxBrowserBytes = 256 * 1024 * 1024;
 const state = {
@@ -76,6 +60,12 @@ const state = {
   catalogRepositories: [],
   nextTags: null,
   nextCatalog: null,
+  catalogScan: null,
+  tagScan: null,
+  manifestResolution: null,
+  catalogGeneration: 0,
+  tagGeneration: 0,
+  filePage: 0,
   layerEvents: [],
   layerStatus: [],
   merged: new Map(),
@@ -85,12 +75,121 @@ const state = {
   redirectOrigin: null,
 };
 
+const listRowOverscan = 8;
+const filePageSize = 250;
+const virtualLists = {};
+
 const $ = (id) => document.getElementById(id);
 
 class PermissionNeeded extends Error {
   constructor(origin) {
     super(`Access to ${origin} is required`);
     this.origin = origin;
+  }
+}
+
+class FixedVirtualList {
+  constructor(element, { rowHeight, overscan, renderRow, onRangeChange = null }) {
+    this.element = element;
+    this.rowHeight = rowHeight;
+    this.overscan = overscan;
+    this.renderRow = renderRow;
+    this.onRangeChange = onRangeChange;
+    this.items = [];
+    this.emptyMessage = "";
+    this.rangeKey = "";
+    element.setAttribute("role", "list");
+    element.tabIndex = 0;
+    element.addEventListener("scroll", () => this.render());
+    element.addEventListener("keydown", (event) => this.handleKey(event));
+    this.resizeObserver = new ResizeObserver(() => this.render());
+    this.resizeObserver.observe(element);
+  }
+
+  setItems(items) {
+    this.items = items;
+    const focusId = document.activeElement?.closest?.("[data-focus-id]")?.dataset.focusId;
+    const focusedTag = focusId?.match(/^tag-(?:open|select):(.+)$/)?.[1];
+    const focusedIndex = focusedTag
+      ? items.findIndex((item) => item.tags?.includes(focusedTag))
+      : -1;
+    if (focusedIndex >= 0) {
+      const firstVisible = Math.floor(this.element.scrollTop / this.rowHeight);
+      const visibleRows = Math.ceil((this.element.clientHeight || this.rowHeight * 6) / this.rowHeight);
+      if (focusedIndex < firstVisible || focusedIndex >= firstVisible + visibleRows) {
+        this.element.scrollTop = focusedIndex * this.rowHeight;
+      }
+    }
+    const maximum = Math.max(0, items.length * this.rowHeight - this.element.clientHeight);
+    if (this.element.scrollTop > maximum) this.element.scrollTop = maximum;
+    this.render(true);
+  }
+
+  setEmptyMessage(message) {
+    this.emptyMessage = message;
+    this.render(true);
+  }
+
+  render(force = false) {
+    const height = this.element.clientHeight || this.rowHeight * 6;
+    const first = Math.max(0, Math.floor(this.element.scrollTop / this.rowHeight) - this.overscan);
+    const last = Math.min(this.items.length, Math.ceil((this.element.scrollTop + height) / this.rowHeight) + this.overscan);
+    const rangeKey = `${first}:${last}:${this.items.length}`;
+    if (!force && rangeKey === this.rangeKey) return;
+    this.rangeKey = rangeKey;
+    const focused = document.activeElement?.closest?.("[data-focus-id]")?.dataset.focusId;
+    const spacer = document.createElement("div");
+    spacer.className = "virtual-spacer";
+    spacer.style.height = `${this.items.length * this.rowHeight}px`;
+    if (!this.items.length && this.emptyMessage) {
+      const empty = document.createElement("p");
+      empty.className = "muted virtual-empty";
+      empty.textContent = this.emptyMessage;
+      empty.setAttribute("role", "listitem");
+      empty.setAttribute("aria-posinset", "1");
+      empty.setAttribute("aria-setsize", "1");
+      spacer.append(empty);
+    }
+    for (let index = first; index < last; index += 1) {
+      const row = this.renderRow(this.items[index], index, this.items.length);
+      row.classList.add("virtual-row");
+      row.style.height = `${this.rowHeight}px`;
+      row.style.transform = `translateY(${index * this.rowHeight}px)`;
+      row.setAttribute("role", "listitem");
+      row.setAttribute("aria-posinset", String(index + 1));
+      row.setAttribute("aria-setsize", String(this.items.length));
+      spacer.append(row);
+    }
+    this.element.replaceChildren(spacer);
+    if (focused) {
+      let target = this.element.querySelector(`[data-focus-id="${CSS.escape(focused)}"]`);
+      const tagFocus = focused.match(/^(tag-open|tag-select):(.+)$/);
+      if (!target && tagFocus) {
+        for (const group of this.element.querySelectorAll("[data-group-tags]")) {
+          if (!JSON.parse(group.dataset.groupTags).includes(tagFocus[2])) continue;
+          target = group.querySelector(tagFocus[1] === "tag-select" ? "select" : "[data-group-open]");
+          break;
+        }
+      }
+      target?.focus({ preventScroll: true });
+    }
+    this.onRangeChange?.(this.items.slice(first, last));
+  }
+
+  handleKey(event) {
+    if (event.target !== this.element) return;
+    const page = Math.max(this.rowHeight, this.element.clientHeight - this.rowHeight);
+    const movement = { ArrowDown: this.rowHeight, ArrowUp: -this.rowHeight, PageDown: page, PageUp: -page }[event.key];
+    if (movement !== undefined) {
+      event.preventDefault();
+      this.element.scrollBy({ top: movement });
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      this.element.scrollTop = 0;
+    } else if (event.key === "End") {
+      event.preventDefault();
+      this.element.scrollTop = this.element.scrollHeight;
+    }
   }
 }
 
@@ -103,7 +202,7 @@ initializeUi();
 function initializeUi() {
   $("runtime-badge").textContent = extensionMode
     ? "Chrome extension"
-    : proxyMode ? "Local proxy" : "Web / CORS mode";
+    : "Web / CORS mode";
   renderPresets();
 
   $("repository-form").addEventListener("submit", (event) => {
@@ -117,9 +216,17 @@ function initializeUi() {
   $("permission-button").addEventListener("click", grantPendingPermission);
   $("catalog-more").addEventListener("click", () => runWithPermissions(loadMoreCatalog));
   $("tags-more").addEventListener("click", () => runWithPermissions(loadMoreTags));
-  $("tag-filter").addEventListener("input", renderTags);
-  $("catalog-filter").addEventListener("input", renderCatalog);
-  $("file-filter").addEventListener("input", renderFiles);
+  $("catalog-search-all").addEventListener("click", () => runWithPermissions(searchRemainingCatalog));
+  $("catalog-cancel-search").addEventListener("click", cancelCatalogSearch);
+  $("tags-search-all").addEventListener("click", () => runWithPermissions(searchRemainingTags));
+  $("tags-cancel-search").addEventListener("click", cancelTagSearch);
+  $("tag-filter").addEventListener("input", debounce(renderTags, 150));
+  $("catalog-filter").addEventListener("input", debounce(renderCatalog, 150));
+  $("catalog-sort").addEventListener("change", renderCatalog);
+  $("tag-sort").addEventListener("change", renderTags);
+  $("file-filter").addEventListener("input", () => { state.filePage = 0; renderFiles(); });
+  $("files-previous").addEventListener("click", () => { state.filePage -= 1; renderFiles(); });
+  $("files-next").addEventListener("click", () => { state.filePage += 1; renderFiles(); });
   $("scan-files").addEventListener("click", () => runWithPermissions(() => scanFiles()));
   $("export-oci").addEventListener("click", () => runWithPermissions(exportOci));
   $("export-docker").addEventListener("click", () => runWithPermissions(exportDocker));
@@ -129,6 +236,18 @@ function initializeUi() {
       if (message?.type === "oci-redirect") state.redirectOrigin = message.origin;
     });
   }
+
+  virtualLists.catalog = new FixedVirtualList($("catalog-results"), {
+    rowHeight: 44,
+    overscan: listRowOverscan,
+    renderRow: renderCatalogRow,
+  });
+  virtualLists.tags = new FixedVirtualList($("tag-results"), {
+    rowHeight: 116,
+    overscan: listRowOverscan,
+    renderRow: renderTagRow,
+    onRangeChange: scheduleVisibleTagResolution,
+  });
 }
 
 function renderPresets() {
@@ -164,8 +283,8 @@ async function runWithPermissions(operation) {
       return;
     }
     console.error(error);
-    const suffix = !extensionMode && !proxyMode && String(error).toLowerCase().includes("fetch")
-      ? " This registry probably blocks browser CORS; load the Chrome extension instead."
+    const suffix = !extensionMode && String(error).toLowerCase().includes("fetch")
+      ? " This registry probably blocks browser CORS; load the Chrome extension or open this page in a CORS-disabled browser instead."
       : "";
     setStatus(`${errorMessage(error)}${suffix}`, true);
   }
@@ -216,9 +335,9 @@ function permissionPattern(origin) {
   return `${url.protocol}//${url.hostname}/*`;
 }
 
-async function registryFetch(url, accept = "*/*", interactive = false) {
+async function registryFetch(url, accept = "*/*", interactive = false, signal = undefined) {
   await ensureOrigin(url, interactive);
-  let response = await rawFetch(url, { accept });
+  let response = await rawFetch(url, { accept, signal });
   if (response.status !== 401) return response;
 
   const challenge = response.headers.get("www-authenticate");
@@ -237,7 +356,7 @@ async function registryFetch(url, accept = "*/*", interactive = false) {
       if (bearer.service) tokenUrl.searchParams.set("service", bearer.service);
       if (bearer.scope) tokenUrl.searchParams.set("scope", bearer.scope);
       await ensureOrigin(tokenUrl);
-      const tokenResponse = await rawFetch(tokenUrl, { accept: "application/json" });
+      const tokenResponse = await rawFetch(tokenUrl, { accept: "application/json", signal });
       if (!tokenResponse.ok) throw new Error(`Token service returned HTTP ${tokenResponse.status}`);
       const body = await tokenResponse.json();
       token = body.token || body.access_token;
@@ -245,7 +364,7 @@ async function registryFetch(url, accept = "*/*", interactive = false) {
       const expiresAt = Date.now() + Math.max(30, Number(body.expires_in || 300) - 15) * 1000;
       state.tokens.set(cacheKey, { token, expiresAt });
     }
-    response = await rawFetch(url, { accept, authorization: `Bearer ${token}` });
+    response = await rawFetch(url, { accept, authorization: `Bearer ${token}`, signal });
     if (response.status !== 403 || !cached) {
       if (response.status === 401) state.tokens.delete(cacheKey);
       return response;
@@ -257,39 +376,20 @@ async function registryFetch(url, accept = "*/*", interactive = false) {
   return response;
 }
 
-async function rawFetch(url, { accept, authorization } = {}) {
+async function rawFetch(url, { accept, authorization, signal } = {}) {
   state.redirectOrigin = null;
   const headers = new Headers();
   if (accept) headers.set("Accept", accept);
   if (authorization) headers.set("Authorization", authorization);
-  let requestUrl = url;
-  if (proxyMode) {
-    headers.set("X-OCI-Zero-Proxy", proxyToken);
-    requestUrl = `/proxy?url=${encodeURIComponent(url)}`;
-  }
   try {
-    let response = await fetch(requestUrl, {
+    return await fetch(url, {
       headers,
-      credentials: proxyMode ? "same-origin" : "include",
+      credentials: "include",
       redirect: "follow",
+      signal,
     });
-    if (proxyMode && response.status === 403
-      && response.headers.get("X-OCI-Zero-Proxy-Error") === "invalid-token") {
-      const staleToken = proxyToken;
-      proxyTokenRefresh ||= requestProxyToken().finally(() => { proxyTokenRefresh = null; });
-      const refreshedToken = await proxyTokenRefresh;
-      if (refreshedToken && refreshedToken !== staleToken) {
-        proxyToken = refreshedToken;
-        headers.set("X-OCI-Zero-Proxy", refreshedToken);
-        response = await fetch(requestUrl, {
-          headers,
-          credentials: "same-origin",
-          redirect: "follow",
-        });
-      }
-    }
-    return response;
   } catch (error) {
+    if (error?.name === "AbortError") throw error;
     await new Promise((resolve) => setTimeout(resolve, 50));
     if (state.redirectOrigin) throw new PermissionNeeded(state.redirectOrigin);
     throw error;
@@ -307,17 +407,28 @@ function parseBearerChallenge(value) {
 
 async function openCatalog(input, interactive = false, path = null, append = false) {
   const registry = normalizeRegistry(input);
+  if (!append) {
+    cancelCatalogSearch();
+    state.catalogGeneration += 1;
+    state.catalogRepositories = [];
+    $("catalog-progress").textContent = "";
+  }
+  const generation = state.catalogGeneration;
   state.catalogBase = registry.base;
+  virtualLists.catalog.setEmptyMessage("");
   const url = path ? new URL(path, registry.base) : new URL("/v2/_catalog?n=100", registry.base);
   setStatus(`Loading the ${registry.host} catalog…`);
   const response = await registryFetch(url, "application/json", interactive);
+  if (generation !== state.catalogGeneration) return;
   if (response.status === 403 || response.status === 404 || response.status === 405) {
     state.catalogRepositories = [];
     state.nextCatalog = null;
     toggleMore("catalog-more", false);
     showPanel("catalog-panel");
-    clear($("catalog-results"));
-    $("catalog-results").append(textNode(`This registry does not expose a catalog. Choose a repository preset or enter its path directly.`));
+    const message = "This registry does not expose a catalog. Choose a repository preset or enter its path directly.";
+    virtualLists.catalog.setItems([]);
+    virtualLists.catalog.setEmptyMessage(message);
+    $("catalog-count").textContent = message;
     setStatus(`${registry.host} does not expose /v2/_catalog.`);
     return;
   }
@@ -338,24 +449,33 @@ function loadMoreCatalog() {
 
 async function openRepository(input, interactive = false, path = null, append = false) {
   const repository = normalize_repository(input);
-  if (!append) resetSelection();
+  if (!append) {
+    resetSelection();
+    cancelTagSearch();
+    cancelManifestResolution();
+    state.tagGeneration += 1;
+    state.tags = [];
+    state.tagManifests = new Map();
+    $("tags-progress").textContent = "";
+  }
   state.repo = { ...repository, base: `${repository.scheme}://${repository.registry}` };
+  const generation = state.tagGeneration;
   const url = path
     ? new URL(path, state.repo.base)
     : new URL(`/v2/${state.repo.repository}/tags/list?n=100`, state.repo.base);
   setStatus(`Loading tags for ${state.repo.registry}/${state.repo.repository}…`);
   const response = await registryFetch(url, "application/json", interactive);
+  if (generation !== state.tagGeneration) return;
   if (!response.ok) throw new Error(`Tags returned HTTP ${response.status}`);
   const page = parse_tags(new Uint8Array(await response.arrayBuffer()));
   state.tags = append ? [...new Set([...state.tags, ...page.tags])] : page.tags;
-  state.tagManifests = append ? state.tagManifests : new Map();
   state.nextTags = nextLink(response, url);
   $("repository-name").textContent = `${state.repo.registry}/${state.repo.repository}`;
   $("repository-input").value = state.repo.scheme === "https"
     ? `${state.repo.registry}/${state.repo.repository}`
     : `${state.repo.base}/${state.repo.repository}`;
   toggleMore("tags-more", state.nextTags);
-  await resolveTagGroups();
+  rebuildTagGroups();
   renderTags();
   showPanel("tags-panel");
   setStatus(`Loaded ${countLabel(state.tags.length, "tag")} for ${page.name || state.repo.repository}.`);
@@ -368,74 +488,44 @@ function loadMoreTags() {
 
 function renderCatalog() {
   const query = $("catalog-filter").value.trim().toLowerCase();
-  const matching = state.catalogRepositories.filter((repository) => repository.toLowerCase().includes(query));
-  const tree = {};
-  for (const repository of matching) {
-    let node = tree;
-    for (const part of repository.split("/")) node = node[part] ||= {};
-    node.__repository = repository;
-  }
-  clear($("catalog-results"));
-  const renderNode = (node, name = null) => {
-    const children = Object.keys(node).filter((key) => key !== "__repository").sort();
-    if (node.__repository && children.length === 0) {
-      const button = document.createElement("button");
-      button.className = "tree-leaf";
-      button.textContent = name;
-      button.title = node.__repository;
-      button.setAttribute("aria-label", `Open repository ${node.__repository}`);
-      button.addEventListener("click", () => {
-        const target = `${state.catalogBase}/${node.__repository}`;
-        $("repository-input").value = target;
-        runWithPermissions(() => openRepository(target));
-      });
-      return button;
-    }
-    const details = document.createElement("details");
-    details.className = "tree-node";
-    details.open = Boolean(query);
-    const summary = document.createElement("summary");
-    summary.textContent = name;
-    details.append(summary);
-    if (node.__repository) {
-      const button = document.createElement("button");
-      button.className = "tree-leaf";
-      button.textContent = "Open repository";
-      button.setAttribute("aria-label", `Open repository ${node.__repository}`);
-      button.addEventListener("click", () => runWithPermissions(() => openRepository(`${state.catalogBase}/${node.__repository}`)));
-      details.append(button);
-    }
-    for (const child of children) details.append(renderNode(node[child], child));
-    return details;
-  };
-  for (const name of Object.keys(tree).sort()) $("catalog-results").append(renderNode(tree[name], name));
+  const direction = $("catalog-sort").value === "name-desc" ? -1 : 1;
+  const matching = state.catalogRepositories
+    .filter((repository) => repository.toLowerCase().includes(query))
+    .sort((left, right) => direction * left.localeCompare(right));
+  virtualLists.catalog.setItems(matching);
+  const more = state.nextCatalog ? "; more pages available." : "; all available pages loaded.";
+  $("catalog-count").textContent = `${countLabel(matching.length, "match")} in ${countLabel(state.catalogRepositories.length, "loaded repository", "loaded repositories")}${more}`;
+  $("catalog-more").disabled = Boolean(state.catalogScan);
+  toggleMore("catalog-search-all", Boolean(query && state.nextCatalog && !state.catalogScan));
+  toggleMore("catalog-cancel-search", Boolean(state.catalogScan));
 }
 
-async function resolveTagGroups() {
-  const unresolved = state.tags.filter((tag) => !state.tagManifests.has(tag));
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(6, unresolved.length) }, async () => {
-    while (next < unresolved.length) {
-      const tag = unresolved[next++];
-      try {
-        const response = await registryFetch(manifestUrl(tag), metadataAccept);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        state.tagManifests.set(tag, { bytes, document: parse_document(bytes), digest: sha256(bytes) });
-      } catch (error) {
-        state.tagManifests.set(tag, { error: errorMessage(error) });
-      }
-    }
-  }));
+function renderCatalogRow(repository) {
+  const row = document.createElement("div");
+  row.className = "catalog-row";
+  row.dataset.key = repository;
+  const button = actionButton(repository, () => {
+    const target = `${state.catalogBase}/${repository}`;
+    $("repository-input").value = target;
+    runWithPermissions(() => openRepository(target));
+  });
+  button.className = "catalog-open";
+  button.dataset.focusId = `catalog:${repository}`;
+  button.setAttribute("aria-label", `Open repository ${repository}`);
+  row.append(button);
+  return row;
+}
+
+function rebuildTagGroups() {
   const grouped = new Map();
   for (const tag of state.tags) {
     const resolved = state.tagManifests.get(tag);
-    const key = resolved?.digest || `failed:${tag}`;
-    const group = grouped.get(key) || { digest: resolved?.digest, tags: [], failed: !resolved?.digest };
+    const key = resolved?.digest || `tag:${tag}`;
+    const group = grouped.get(key) || { key, digest: resolved?.digest, tags: [], failed: Boolean(resolved?.error) };
     group.tags.push(tag);
     grouped.set(key, group);
   }
-  state.tagGroups = [...grouped.values()].map((group) => ({ ...group, title: canonicalTag(group.tags) })).sort(compareVersionGroups);
+  state.tagGroups = [...grouped.values()].map((group) => ({ ...group, title: canonicalTag(group.tags) }));
 }
 
 function canonicalTag(tags) {
@@ -454,37 +544,229 @@ function compareVersionGroups(left, right) { return compareVersions(left.title, 
 
 function renderTags() {
   const query = $("tag-filter").value.trim().toLowerCase();
-  const filtered = state.tagGroups.filter((group) => !query || group.title.toLowerCase().includes(query) || group.digest?.toLowerCase().includes(query) || group.tags.some((tag) => tag.toLowerCase().includes(query)));
-  const visible = filtered.slice(0, 500);
-  clear($("tag-results"));
-  for (const group of visible) {
-    const card = document.createElement("div"); card.className = "version-group";
-    if (group.tags.includes(state.tag)) card.setAttribute("aria-current", "true");
-    const heading = document.createElement("div"); heading.className = "version-title";
-    const open = actionButton("Open", () => runWithPermissions(() => inspectTag(group.title)));
-    open.setAttribute("aria-label", `Open version ${group.title}`);
-    heading.append(textNode(group.title), open);
-    card.append(heading);
-    const digest = document.createElement("code"); digest.className = "version-digest"; digest.textContent = group.digest || "manifest resolution failed"; card.append(digest);
-    const aliases = group.tags.filter((tag) => tag !== group.title);
-    if (aliases.length) {
-      const chips = document.createElement("div"); chips.className = "chips";
-      for (const alias of aliases) {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "chip";
-        chip.textContent = alias;
-        chip.setAttribute("aria-label", `Open alias ${alias}`);
-        chip.addEventListener("click", () => runWithPermissions(() => inspectTag(alias)));
-        chips.append(chip);
-      }
-      card.append(chips);
-    }
-    $("tag-results").append(card);
+  const filtered = state.tagGroups.filter((group) => !query
+    || group.digest?.toLowerCase().includes(query)
+    || group.tags.some((tag) => tag.toLowerCase().includes(query)));
+  const sort = $("tag-sort").value;
+  filtered.sort(sort === "version-desc"
+    ? compareVersionGroups
+    : (left, right) => (sort === "name-desc" ? -1 : 1) * left.title.localeCompare(right.title));
+  virtualLists.tags.setItems(filtered);
+  const completed = state.tags.filter((tag) => {
+    const result = state.tagManifests.get(tag);
+    return result && !result.pending;
+  }).length;
+  const more = state.nextTags ? " More pages are available." : " All available tag pages are loaded.";
+  $("tag-limit").textContent = `${countLabel(filtered.length, "matching group")} across ${countLabel(state.tags.length, "loaded tag")}. ${completed} of ${state.tags.length} loaded tags resolved; alias groups may be incomplete.${more}`;
+  $("tags-more").disabled = Boolean(state.tagScan);
+  toggleMore("tags-search-all", Boolean(query && state.nextTags && !state.tagScan));
+  toggleMore("tags-cancel-search", Boolean(state.tagScan));
+}
+
+function renderTagRow(group) {
+  const card = document.createElement("div");
+  card.className = "version-group";
+  card.dataset.key = group.key;
+  card.dataset.groupTags = JSON.stringify(group.tags);
+  if (group.tags.includes(state.tag)) card.setAttribute("aria-current", "true");
+  const heading = document.createElement("div");
+  heading.className = "version-title";
+  const title = document.createElement("strong");
+  title.textContent = group.title;
+  const controls = document.createElement("div");
+  controls.className = "tag-row-controls";
+  const selector = document.createElement("select");
+  selector.dataset.focusId = `tag-select:${group.title}`;
+  selector.setAttribute("aria-label", `Alias for ${group.title}`);
+  for (const tag of [...group.tags].sort(compareVersions)) {
+    const option = document.createElement("option");
+    option.value = tag;
+    option.textContent = tag;
+    option.selected = tag === group.title;
+    selector.append(option);
   }
-  $("tag-limit").textContent = filtered.length > visible.length
-    ? `Showing 500 of ${countLabel(filtered.length, "matching tag")}; refine the filter.`
-    : `${countLabel(filtered.length, "matching tag")}.`;
+  const open = actionButton("Open", () => runWithPermissions(() => inspectTag(selector.value)));
+  const updateLabel = () => open.setAttribute("aria-label", selector.value === group.title
+    ? `Open version ${selector.value}` : `Open alias ${selector.value}`);
+  selector.addEventListener("change", updateLabel);
+  updateLabel();
+  open.dataset.focusId = `tag-open:${group.title}`;
+  open.dataset.groupOpen = "true";
+  controls.append(selector, open);
+  heading.append(title, controls);
+  const digest = document.createElement("code");
+  digest.className = "version-digest";
+  digest.textContent = group.digest || (group.failed ? "manifest resolution failed" : "manifest not resolved yet");
+  card.append(heading, digest);
+  const latest = group.tags.find((tag) => tag.toLowerCase() === "latest" && tag !== group.title);
+  if (latest) {
+    const chip = actionButton(latest, () => runWithPermissions(() => inspectTag(latest)));
+    chip.className = "chip";
+    chip.dataset.focusId = `tag-open:${latest}`;
+    chip.setAttribute("aria-label", `Open alias ${latest}`);
+    card.append(chip);
+  }
+  return card;
+}
+
+function scheduleVisibleTagResolution(groups) {
+  if (!state.repo) return;
+  let work = state.manifestResolution;
+  if (!work || work.generation !== state.tagGeneration) {
+    work = {
+      generation: state.tagGeneration,
+      controller: new AbortController(),
+      queue: [],
+      queued: new Set(),
+      active: 0,
+    };
+    state.manifestResolution = work;
+  }
+  for (const group of groups) for (const tag of group.tags) {
+    if (!state.tagManifests.has(tag) && !work.queued.has(tag)) {
+      work.queued.add(tag);
+      work.queue.push(tag);
+    }
+  }
+  pumpTagResolution(work);
+}
+
+function pumpTagResolution(work) {
+  while (work.active < 4 && work.queue.length && state.manifestResolution === work) {
+    const tag = work.queue.shift();
+    work.active += 1;
+    state.tagManifests.set(tag, { pending: true });
+    void resolveOneTag(tag, work).finally(() => {
+      work.active -= 1;
+      pumpTagResolution(work);
+    });
+  }
+}
+
+async function resolveOneTag(tag, work) {
+  try {
+    const response = await registryFetch(manifestUrl(tag), metadataAccept, false, work.controller.signal);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (state.manifestResolution !== work) return;
+    state.tagManifests.set(tag, { bytes, document: parse_document(bytes), digest: sha256(bytes) });
+  } catch (error) {
+    if (error?.name === "AbortError" || state.manifestResolution !== work) return;
+    state.tagManifests.set(tag, { error: errorMessage(error) });
+  }
+  rebuildTagGroups();
+  renderTags();
+}
+
+async function searchRemainingCatalog() {
+  if (!state.nextCatalog || state.catalogScan || !$("catalog-filter").value.trim()) return;
+  const scan = {
+    controller: new AbortController(),
+    generation: state.catalogGeneration,
+    seen: new Set(),
+    pages: 0,
+    initialItems: state.catalogRepositories.length,
+  };
+  state.catalogScan = scan;
+  renderCatalog();
+  try {
+    while (state.nextCatalog && state.catalogScan === scan) {
+      const url = state.nextCatalog;
+      if (scan.seen.has(url.href)) {
+        $("catalog-progress").textContent = `Stopped after ${scan.pages} pages because the registry repeated a pagination cursor; partial results were retained.`;
+        state.nextCatalog = null;
+        break;
+      }
+      scan.seen.add(url.href);
+      const response = await registryFetch(url, "application/json", false, scan.controller.signal);
+      if (!response.ok) throw new Error(`Catalog returned HTTP ${response.status}`);
+      const repositories = parse_catalog(new Uint8Array(await response.arrayBuffer()));
+      state.catalogRepositories = [...new Set([...state.catalogRepositories, ...repositories])];
+      state.nextCatalog = nextLink(response, url);
+      scan.pages += 1;
+      renderCatalog();
+      $("catalog-progress").textContent = `Searched ${countLabel(scan.pages, "additional page")}; loaded ${countLabel(state.catalogRepositories.length - scan.initialItems, "additional repository")}.`;
+    }
+    if (state.catalogScan === scan && !state.nextCatalog) {
+      $("catalog-progress").textContent = `Search complete: ${scan.pages} additional pages searched; ${state.catalogRepositories.length} repositories loaded.`;
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      $("catalog-progress").textContent = `Search stopped after ${scan.pages} pages: ${errorMessage(error)} Partial results were retained.`;
+    }
+  } finally {
+    if (state.catalogScan === scan) state.catalogScan = null;
+    toggleMore("catalog-more", state.nextCatalog);
+    renderCatalog();
+  }
+}
+
+function cancelCatalogSearch() {
+  const scan = state.catalogScan;
+  if (!scan) return;
+  state.catalogScan = null;
+  scan.controller.abort();
+  $("catalog-progress").textContent = `Search cancelled after ${scan.pages} pages; partial results were retained.`;
+  renderCatalog();
+}
+
+async function searchRemainingTags() {
+  if (!state.nextTags || state.tagScan || !$("tag-filter").value.trim() || !state.repo) return;
+  const scan = {
+    controller: new AbortController(),
+    generation: state.tagGeneration,
+    seen: new Set(),
+    pages: 0,
+    initialItems: state.tags.length,
+  };
+  state.tagScan = scan;
+  renderTags();
+  try {
+    while (state.nextTags && state.tagScan === scan && scan.generation === state.tagGeneration) {
+      const url = state.nextTags;
+      if (scan.seen.has(url.href)) {
+        $("tags-progress").textContent = `Stopped after ${scan.pages} pages because the registry repeated a pagination cursor; partial results were retained.`;
+        state.nextTags = null;
+        break;
+      }
+      scan.seen.add(url.href);
+      const response = await registryFetch(url, "application/json", false, scan.controller.signal);
+      if (!response.ok) throw new Error(`Tags returned HTTP ${response.status}`);
+      const page = parse_tags(new Uint8Array(await response.arrayBuffer()));
+      state.tags = [...new Set([...state.tags, ...page.tags])];
+      state.nextTags = nextLink(response, url);
+      scan.pages += 1;
+      rebuildTagGroups();
+      renderTags();
+      $("tags-progress").textContent = `Searched ${countLabel(scan.pages, "additional page")}; loaded ${countLabel(state.tags.length - scan.initialItems, "additional tag name")}.`;
+    }
+    if (state.tagScan === scan && !state.nextTags) {
+      $("tags-progress").textContent = `Search complete: ${scan.pages} additional pages searched; ${state.tags.length} tag names loaded. Manifests were not fetched by the scan.`;
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      $("tags-progress").textContent = `Search stopped after ${scan.pages} pages: ${errorMessage(error)} Partial results were retained.`;
+    }
+  } finally {
+    if (state.tagScan === scan) state.tagScan = null;
+    toggleMore("tags-more", state.nextTags);
+    renderTags();
+  }
+}
+
+function cancelTagSearch() {
+  const scan = state.tagScan;
+  if (!scan) return;
+  state.tagScan = null;
+  scan.controller.abort();
+  $("tags-progress").textContent = `Search cancelled after ${scan.pages} pages; partial results were retained.`;
+  renderTags();
+}
+
+function cancelManifestResolution() {
+  const work = state.manifestResolution;
+  state.manifestResolution = null;
+  work?.controller.abort();
 }
 
 async function inspectTag(tag) {
@@ -500,6 +782,8 @@ async function inspectTag(tag) {
     const bytes = new Uint8Array(await response.arrayBuffer());
     cached = { bytes, document: parse_document(bytes), digest: sha256(bytes) };
     state.tagManifests.set(tag, cached);
+    rebuildTagGroups();
+    renderTags();
   }
   const { bytes, document } = cached;
   state.rootManifest = { bytes, document };
@@ -557,6 +841,7 @@ async function activateManifest(bytes, document, platform) {
   state.layerEvents = [];
   state.layerStatus = [];
   state.merged = new Map();
+  state.filePage = 0;
   hidePanel("files-panel");
   clear($("descriptors"));
   $("descriptors").append(descriptorRow("config", document.config));
@@ -913,7 +1198,10 @@ function renderFiles() {
   const files = [...state.merged.values()]
     .filter((entry) => entry.path.toLowerCase().includes(query))
     .sort((left, right) => left.path.localeCompare(right.path));
-  const visible = files.slice(0, 1000);
+  const pageCount = Math.max(1, Math.ceil(files.length / filePageSize));
+  state.filePage = Math.max(0, Math.min(state.filePage, pageCount - 1));
+  const start = state.filePage * filePageSize;
+  const visible = files.slice(start, start + filePageSize);
   clear($("file-results-body"));
   for (const entry of visible) {
     const row = document.createElement("tr");
@@ -959,8 +1247,10 @@ function renderFiles() {
   }
   const provisional = state.layerStatus.includes("scanning") ? " · scanning" : "";
   $("file-count").textContent = `${countLabel(state.merged.size, "entry", "entries")}${provisional}`;
-  $("file-limit").textContent = files.length > visible.length
-    ? `Showing 1000 of ${countLabel(files.length, "matching entry", "matching entries")}; refine the filter.`
+  $("files-previous").disabled = state.filePage === 0;
+  $("files-next").disabled = state.filePage >= pageCount - 1;
+  $("file-limit").textContent = files.length > filePageSize
+    ? `Showing ${start + 1}–${Math.min(start + filePageSize, files.length)} of ${countLabel(files.length, "matching entry", "matching entries")}.`
     : `${countLabel(files.length, "matching entry", "matching entries")}.`;
 }
 
@@ -1293,4 +1583,12 @@ function actionButton(label, action) {
 
 function errorMessage(error) {
   return error?.message || String(error);
+}
+
+function debounce(callback, delay) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => callback(...args), delay);
+  };
 }
