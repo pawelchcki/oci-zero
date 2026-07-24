@@ -1,11 +1,22 @@
 name: CI
 
 on:
+  # `pull_request` is what validates changes: it builds the merge result rather
+  # than the branch tip, and for forks it runs with a read-only token and no
+  # secrets. An unfiltered `push` would duplicate every one of those runs while
+  # never covering fork PRs at all, so `push` is scoped to the default branch to
+  # validate merges and keep the badge on main meaningful.
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# Superseded pull-request runs are worth cancelling; runs on main are not.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   quality:
