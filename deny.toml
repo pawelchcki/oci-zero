@@ -1,0 +1,22 @@
+# cargo-deny configuration for the *shipped* dependency graph.
+#
+# CI gates on this file, which excludes dev-dependencies: it answers "is anything
+# a user of the published crates pulls in vulnerable?". That graph is small --
+# sha2, miniz_oxide, and the optional base64/serde/embedded-*/reqwless/mbedtls
+# stack -- so a hit here is real and actionable.
+#
+# Dev-dependencies are checked separately by `deny-dev.toml` in a non-blocking CI
+# step. They are not gated because the test HTTP stack (ureq 2.9.7, url 2.4.1) is
+# version-pinned to keep the Rust 1.75 MSRV, and its known advisories are all
+# unfixable without dropping that pin. See deny-dev.toml for the current list.
+
+[advisories]
+version = 2
+# Nothing ignored: any advisory reaching this graph should fail the build.
+ignore = []
+
+[graph]
+exclude-dev = true
+# The published crates are no-std and target-agnostic, so resolve every target
+# rather than only the host.
+all-features = true
