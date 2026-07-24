@@ -37,11 +37,15 @@ jobs:
             ci
             build
             chore
-          # Optional scopes; when present they should be a crate name.
+          # Optional scopes; when present they should be a crate name. The two
+          # `publish = false` crates are listed too -- they never appear in a
+          # changelog, but a PR touching only them should still be able to say so.
           scopes: |
             oci-zero
             gzip-zero
             zstd-zero
+            oci-zero-web
+            oci-zero-no-std-extract
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |

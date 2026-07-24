@@ -6,6 +6,7 @@ rust-version = "1.75"
 description = "A no-std, allocation-free streaming Zstandard decoder"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pawelchcki/oci-zero"
+readme = "README.md"
 keywords = ["zstd", "zstandard", "no-std", "compression"]
 categories = ["compression", "no-std"]
 

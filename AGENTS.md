@@ -45,7 +45,8 @@ publish a new `oci-zero`.
 ### Scopes
 
 Prefer a crate name as the scope so changelogs attribute correctly:
-`oci-zero`, `gzip-zero`, `zstd-zero`. Example: `fix(gzip-zero): reject trailer with wrong ISIZE`.
+`oci-zero`, `gzip-zero`, `zstd-zero`, `oci-zero-web`, `oci-zero-no-std-extract`.
+Example: `fix(gzip-zero): reject trailer with wrong ISIZE`.
 
 ### Examples
 
