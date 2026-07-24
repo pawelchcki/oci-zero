@@ -222,6 +222,27 @@ test("shows a friendly fallback when the registry catalog is unavailable", async
   await expect(page.getByRole("button", { name: "Load more repositories" })).toBeHidden();
 });
 
+test("treats a rejected catalog token as an unavailable catalog", async ({ page, baseURL }) => {
+  // Docker Hub answers a registry:catalog:* token request with HTTP 400
+  // "unknown resource type"; that should degrade to the friendly fallback.
+  await page.route("**/v2/_catalog?**", (route) => route.fulfill({
+    status: 401,
+    headers: { "www-authenticate": 'Bearer realm="https://auth.example.test/token",service="registry.example.test",scope="registry:catalog:*"' },
+    body: "unauthorized\n",
+  }));
+  await page.route("https://auth.example.test/token?**", (route) => route.fulfill({
+    status: 400,
+    contentType: "application/json",
+    body: JSON.stringify({ details: "unknown resource type" }),
+  }));
+
+  await page.locator("#registry-input").fill(baseURL);
+  await page.getByRole("button", { name: "Open catalog" }).click();
+  await expect(page.locator("#catalog-results")).toHaveText(/does not expose a catalog.*enter its path directly/);
+  await expect(page.locator("#status")).toHaveText(`${new URL(baseURL).host} does not expose /v2/_catalog.`);
+  await expect(page.locator("#status")).not.toHaveClass(/error/);
+});
+
 test("downloads valid OCI and Docker archive layouts", async ({ page, baseURL }) => {
   await openImage(page, baseURL, "latest");
 

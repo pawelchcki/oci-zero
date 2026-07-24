@@ -88,6 +88,14 @@ class PermissionNeeded extends Error {
   }
 }
 
+class TokenServiceError extends Error {
+  constructor(status, detail) {
+    super(`Token service returned HTTP ${status}${detail ? ` (${detail})` : ""}`);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 class FixedVirtualList {
   constructor(element, { rowHeight, overscan, renderRow, onRangeChange = null }) {
     this.element = element;
@@ -363,7 +371,7 @@ async function registryFetch(url, accept = "*/*", interactive = false, signal = 
       if (bearer.scope) tokenUrl.searchParams.set("scope", bearer.scope);
       await ensureOrigin(tokenUrl);
       const tokenResponse = await rawFetch(tokenUrl, { accept: "application/json", signal });
-      if (!tokenResponse.ok) throw new Error(`Token service returned HTTP ${tokenResponse.status}`);
+      if (!tokenResponse.ok) throw new TokenServiceError(tokenResponse.status, await tokenServiceDetail(tokenResponse));
       const body = await tokenResponse.json();
       token = body.token || body.access_token;
       if (!token) throw new Error("Token service response has no token");
@@ -402,6 +410,22 @@ async function rawFetch(url, { accept, authorization, signal } = {}) {
   }
 }
 
+async function tokenServiceDetail(response) {
+  try {
+    const text = await response.text();
+    if (!text) return "";
+    try {
+      const body = JSON.parse(text);
+      return body.details || body.error_description || body.error
+        || body.errors?.[0]?.message || body.errors?.[0]?.code || "";
+    } catch {
+      return text.trim().slice(0, 120);
+    }
+  } catch {
+    return "";
+  }
+}
+
 function parseBearerChallenge(value) {
   const result = {};
   for (const match of value.slice(value.indexOf(" ") + 1).matchAll(/([A-Za-z_]+)="((?:[^"\\]|\\.)*)"/g)) {
@@ -424,18 +448,23 @@ async function openCatalog(input, interactive = false, path = null, append = fal
   virtualLists.catalog.setEmptyMessage("");
   const url = path ? new URL(path, registry.base) : new URL("/v2/_catalog?n=100", registry.base);
   setStatus(`Loading the ${registry.host} catalog…`);
-  const response = await registryFetch(url, "application/json", interactive);
+  let response;
+  try {
+    response = await registryFetch(url, "application/json", interactive);
+  } catch (error) {
+    if (generation !== state.catalogGeneration) return;
+    // A registry that refuses to mint a catalog token (e.g. Docker Hub answers
+    // registry:catalog:* with HTTP 400 "unknown resource type") does not expose
+    // a catalog — treat it the same as an explicit 403/404/405.
+    if (error instanceof TokenServiceError && !append) {
+      markCatalogUnavailable(registry);
+      return;
+    }
+    throw error;
+  }
   if (generation !== state.catalogGeneration) return;
   if (response.status === 403 || response.status === 404 || response.status === 405) {
-    state.catalogRepositories = [];
-    state.nextCatalog = null;
-    toggleMore("catalog-more", false);
-    showPanel("catalog-panel");
-    const message = "This registry does not expose a catalog. Choose a repository preset or enter its path directly.";
-    virtualLists.catalog.setItems([]);
-    virtualLists.catalog.setEmptyMessage(message);
-    $("catalog-count").textContent = message;
-    setStatus(`${registry.host} does not expose /v2/_catalog.`);
+    markCatalogUnavailable(registry);
     return;
   }
   if (!response.ok) throw new Error(`Catalog returned HTTP ${response.status}`);
@@ -446,6 +475,18 @@ async function openCatalog(input, interactive = false, path = null, append = fal
   renderCatalog();
   showPanel("catalog-panel");
   setStatus(`Loaded ${countLabel(state.catalogRepositories.length, "repository", "repositories")} from ${registry.host}.`);
+}
+
+function markCatalogUnavailable(registry) {
+  state.catalogRepositories = [];
+  state.nextCatalog = null;
+  toggleMore("catalog-more", false);
+  showPanel("catalog-panel");
+  const message = "This registry does not expose a catalog. Choose a repository preset or enter its path directly.";
+  virtualLists.catalog.setItems([]);
+  virtualLists.catalog.setEmptyMessage(message);
+  $("catalog-count").textContent = message;
+  setStatus(`${registry.host} does not expose /v2/_catalog.`);
 }
 
 function loadMoreCatalog() {
