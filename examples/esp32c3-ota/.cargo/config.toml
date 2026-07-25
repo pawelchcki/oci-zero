@@ -3,7 +3,7 @@ target = "riscv32imc-unknown-none-elf"
 
 [target.riscv32imc-unknown-none-elf]
 # `espflash flash --monitor` makes `cargo run` flash the attached board.
-runner = "espflash flash --monitor"
+runner = "espflash flash --monitor --partition-table partitions.csv"
 # esp-hal's linker scripts place the app descriptor, flash segments and RAM.
 rustflags = ["-C", "link-arg=-Tlinkall.x"]
 

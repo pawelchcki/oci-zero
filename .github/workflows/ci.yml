@@ -48,6 +48,16 @@ jobs:
           node --check web/tests/server.mjs
           python3 -m json.tool web/manifest.json > /dev/null
           sh -n tools/build-firmware-artifact.sh
+      # The QR code committed to examples/esp32c3-ota/README.md is generated from
+      # rs-matter's commissioning constants. Regenerate and diff, so changing them
+      # fails the build until the README is regenerated too.
+      - name: Committed Matter onboarding data is current
+        run: |
+          cargo run -q -p oci-zero-matter-qr
+          git diff --exit-code -- examples/esp32c3-ota/onboarding-qr.svg \
+            examples/esp32c3-ota/onboarding-qr.txt \
+            examples/esp32c3-ota/onboarding.txt
+
       - name: Public OCI artifact metadata smoke tests
         run: cargo test --release --test metadata_smoke inspects_public_registry_fixtures -- --ignored --nocapture
       - name: no_std MbedTLS streamed extraction smoke test

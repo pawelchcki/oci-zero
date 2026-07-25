@@ -19,22 +19,31 @@ IMAGE=target/measure-image.bin
 # ESP32-C3 has 400 KB of SRAM. The ROM bootloader and the wireless stacks claim
 # part of it, and ~320 KB is the usual usable figure for an application.
 USABLE_DRAM=327680
-# Two OTA slots alongside nvs/otadata/phy_init in 4 MB of flash.
-OTA_SLOT=1835008
+# One of the two OTA slots in partitions.csv (0x1E0000 bytes each).
+OTA_SLOT=1966080
 # Must track HEAP_SIZE in src/main.rs.
 HEAP=102400
 
 printf '%-10s%9s%8s%9s%9s%9s%9s%8s%9s%8s\n' \
     rung image 'of ota' .text .rodata static +heap 'of ram' headroom build
 
-for features in "" oci radio tls matter full; do
+# The rungs, then `device`. `device` is the real firmware -- the same features as
+# `full` but without `measure`, so main.rs runs the Matter stack instead of the
+# reference functions. It is much larger, because allocating the Matter stack links
+# almost none of its runtime: the rungs attribute cost between layers, `device` is
+# the number that has to fit.
+for features in "" oci radio tls matter full device; do
     label=${features:-baseline}
     start=$(date +%s)
 
-    if [ -z "$features" ]; then
-        set -- --release
+    # `measure` keeps main.rs in harness mode: the reference functions run and
+    # nothing commissions, so every rung measures the same way.
+    if [ "$features" = "device" ]; then
+        set -- --release --features full
+    elif [ -z "$features" ]; then
+        set -- --release --features measure
     else
-        set -- --release --features "$features"
+        set -- --release --features "measure,$features"
     fi
     if ! cargo build "$@" >/dev/null 2>&1; then
         printf '%-10s%s\n' "$label" "  BUILD FAILED — rerun without the redirect to see why"

@@ -1,0 +1,12 @@
+[package]
+name = "oci-zero-matter-qr"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Generates the committed Matter onboarding payload for the ESP32-C3 example"
+
+[dependencies]
+# The same crate — and the same constants — the firmware commissions with, so the
+# committed QR code cannot describe a device other than the one that is built.
+rs-matter = "0.2"

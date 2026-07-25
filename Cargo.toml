@@ -15,7 +15,7 @@ categories = ["no-std", "network-programming", "parser-implementations"]
 exclude = ["examples/esp32c3-ota"]
 
 [workspace]
-members = ["gzip-zero", "no-std-extract", "web", "zstd-zero"]
+members = ["gzip-zero", "no-std-extract", "tools/matter-qr", "web", "zstd-zero"]
 # Not a member: it targets riscv32imc-unknown-none-elf and patches esp-hal to a
 # git revision, neither of which may leak into the hosted crates.
 exclude = ["examples/esp32c3-ota"]

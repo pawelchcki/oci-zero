@@ -6,14 +6,27 @@ Reproduce with `./measure.sh` — plain `cargo`, no container and no C toolchain
 Numbers below are from `rustc 1.95.0`, `opt-level = "z"`, `lto = "fat"`,
 `codegen-units = 1`, `panic = "abort"`.
 
-| rung       | image (OTA) |    of slot |   .text | .rodata | static RAM |  + heap |   of DRAM | stack headroom |
-| ---------- | ----------: | ---------: | ------: | ------: | ---------: | ------: | --------: | -------------: |
-| `baseline` |      93,872 |       5.1% |  32,746 |  12,480 |     38,164 | 140,564 |     42.9% |        277,860 |
-| `oci`      |     105,632 |       5.8% |  44,382 |  15,404 |     43,468 | 145,868 |     44.5% |        272,684 |
-| `tls`      |     344,416 |      18.8% | 283,162 |  34,688 |     69,436 | 171,836 |     52.4% |        246,716 |
-| `radio`    |     525,952 |      28.7% | 444,624 |  73,916 |     57,580 | 159,980 |     48.8% |        204,528 |
-| `matter`   |     529,504 |      28.9% | 446,088 |  75,956 |    135,820 | 238,220 |     72.7% |        126,288 |
-| **`full`** | **801,072** |  **43.7%** | 695,192 |  97,244 |    167,108 | 269,508 | **82.2%** |     **95,128** |
+| rung        | image (OTA) |    of slot |     .text | .rodata | static RAM |  + heap |   of DRAM | stack headroom |
+| ----------- | ----------: | ---------: | --------: | ------: | ---------: | ------: | --------: | -------------: |
+| `baseline`  |      93,888 |       4.8% |    32,764 |  12,480 |     38,164 | 140,564 |     42.9% |        277,860 |
+| `oci`       |     105,664 |       5.4% |    44,410 |  15,404 |     43,468 | 145,868 |     44.5% |        272,684 |
+| `radio`     |     525,984 |      26.8% |   444,646 |  73,916 |     57,580 | 159,980 |     48.8% |        204,528 |
+| `tls`       |     344,448 |      17.5% |   283,190 |  34,688 |     69,436 | 171,836 |     52.4% |        246,716 |
+| `matter`    |     529,520 |      26.9% |   446,110 |  75,956 |    135,820 | 238,220 |     72.7% |        126,288 |
+| `full`      |     801,104 |      40.7% |   695,220 |  97,244 |    167,108 | 269,508 |     82.2% |         95,128 |
+| **`device`** | **1,253,200** | **63.7%** | 1,046,268 | 188,920 |    150,388 | 252,788 | **77.1%** |    **111,656** |
+
+`device` is the real firmware — `full` without `measure`, so it runs the Matter
+stack rather than the reference functions. **It is 450 KB larger than `full`,**
+because allocating the Matter stack links almost none of its runtime: the data
+model, the interaction model, commissioning and mDNS only appear once something
+calls `run_coex`. The rungs are for attributing cost between layers; `device` is
+the number that has to fit.
+
+Its static RAM is *lower* than `full`'s because the TLS record buffers are not
+there yet — nothing calls TLS until the OCI update path lands. Expect roughly
++240 KB of flash and +26 KB of static RAM when it does, which lands near 1.5 MB
+(76% of a slot) and 176 KB of statics.
 
 Budgets: one OTA slot of 1,835,008 bytes (1.75 MB, two slots plus
 `nvs`/`otadata`/`phy_init` in 4 MB); 327,680 bytes of usable DRAM; a 100 KB heap.

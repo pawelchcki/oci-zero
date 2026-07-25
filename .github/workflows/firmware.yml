@@ -79,8 +79,14 @@ jobs:
 
       # Nothing in this crate compiles C, so no clang, cmake or Espressif GCC
       # toolchain is needed. See examples/esp32c3-ota/MEASUREMENTS.md.
+      # `full` without `measure`: the real device, not the measurement harness.
+      # OCI_ZERO_FIRMWARE_VERSION is the same string the artifact annotation
+      # carries, so Matter's SoftwareVersionString, esp_app_desc and the registry
+      # all report one version.
       - name: Build firmware
         working-directory: examples/esp32c3-ota
+        env:
+          OCI_ZERO_FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
         run: cargo build --release --target "$TARGET" --features full
 
       - name: Save flashable image
@@ -91,12 +97,14 @@ jobs:
             firmware.bin
           ls -l firmware.bin
 
+      # The offset has to match ota_0 in examples/esp32c3-ota/partitions.csv, and
+      # the table itself ships alongside so a blank board can be provisioned.
       - name: Assemble OCI layout
         id: layout
         run: |
           set -eu
           ./tools/build-firmware-artifact.sh \
-            --image firmware.bin:0x10000 \
+            --image firmware.bin:0x20000 \
             --version '${{ steps.version.outputs.version }}' \
             --revision "$GITHUB_SHA" \
             --chip "$CHIP" \

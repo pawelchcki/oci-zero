@@ -1,18 +1,18 @@
 //! ESP32-C3 firmware that pulls its own next version from an OCI registry.
 //!
-//! Right now this binary exists to answer one question: does esp-hal +
-//! esp-radio + `rs-matter-embassy` + `oci-zero` with TLS *fit* on this part?
-//! See MEASUREMENTS.md for the answer and `measure.sh` for how it is taken.
+//! It has two modes, chosen at compile time:
 //!
-//! Each feature adds one layer of the eventual firmware. The layers are
-//! *referenced*, not merely depended on: with `lto = "fat"` a dependency nothing
-//! calls is discarded entirely, so a rung that only adds a `Cargo.toml` line
-//! measures nothing. Every `reference_*` function below exists to drag the code
-//! paths the finished firmware will use into the linked image, and each one ends
-//! in a `black_box` so constant folding cannot delete the work.
+//! * **The device** (`--features matter`, or `full`). Commissions onto WiFi over
+//!   BLE with the permanent QR code in the README, persists the credentials to the
+//!   `nvs` partition, and stays on the fabric. BLE and WiFi run concurrently, so a
+//!   commissioner can reach the node over IP without waiting for a reboot.
+//! * **The measurement harness** (`--features measure`). Runs the `reference_*`
+//!   functions and commissions nothing. Each one exists to drag a layer of the
+//!   finished firmware into the linked image, because with `lto = "fat"` a
+//!   dependency nothing calls is discarded entirely, so a rung that only added a
+//!   `Cargo.toml` line would measure nothing. See MEASUREMENTS.md and measure.sh.
 //!
-//! Nothing here commissions, connects or updates yet. Those arrive once the
-//! measurement says they can.
+//! The OCI self-update path is not implemented yet; only its cost is measured.
 #![no_std]
 #![no_main]
 #![recursion_limit = "256"]
@@ -58,7 +58,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupts.software_interrupt0);
 
-    info!("oci-zero esp32c3-ota measurement build");
+    info!("oci-zero esp32c3-ota {}", FIRMWARE_VERSION);
     info!("heap {} bytes, {} reclaimed", HEAP_SIZE, RECLAIMED_RAM);
 
     // One TRNG source for the whole program: `Trng::try_new()` only succeeds
@@ -71,22 +71,54 @@ async fn main(_spawner: embassy_executor::Spawner) {
         peripherals.ADC1,
     ));
 
-    #[cfg(feature = "oci")]
-    reference_oci_zero().await;
+    #[cfg(feature = "measure")]
+    {
+        #[cfg(feature = "oci")]
+        reference_oci_zero().await;
 
-    #[cfg(feature = "tls")]
-    reference_tls().await;
+        #[cfg(feature = "tls")]
+        reference_tls().await;
 
-    #[cfg(feature = "radio")]
-    reference_radio(peripherals.WIFI, peripherals.BT);
+        #[cfg(feature = "radio")]
+        reference_radio(peripherals.WIFI, peripherals.BT);
 
-    #[cfg(feature = "matter")]
-    reference_matter();
+        #[cfg(feature = "matter")]
+        reference_matter();
 
-    loop {
-        embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+        loop {
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+        }
+    }
+
+    #[cfg(all(feature = "matter", not(feature = "measure")))]
+    run_device(
+        peripherals.FLASH,
+        peripherals.WIFI,
+        peripherals.BT,
+        peripherals.GPIO9,
+    )
+    .await;
+
+    #[cfg(not(any(feature = "matter", feature = "measure")))]
+    {
+        info!("built without `matter`: nothing to run. Try --features full.");
+        loop {
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+        }
     }
 }
+
+/// The version reported in Matter's Basic Information cluster and by
+/// `esp_app_desc`.
+///
+/// CI sets `OCI_ZERO_FIRMWARE_VERSION` to the same string it writes into the OCI
+/// artifact's `org.opencontainers.image.version` annotation, so a commissioner
+/// shows the version that came out of the registry. A local build falls back to
+/// the crate version.
+const FIRMWARE_VERSION: &str = match option_env!("OCI_ZERO_FIRMWARE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// Drives the real `pull()` walk over an in-memory registry, with the layer
 /// inflated through `gzip-zero` and verified against its descriptor.
@@ -413,3 +445,207 @@ fn reference_matter() {
     );
     core::hint::black_box(stack);
 }
+
+/// Runs the Matter stack: BLE commissioning concurrently with WiFi, credentials
+/// persisted to the `nvs` partition, and a BOOT-button factory reset.
+///
+/// `run_coex` rather than `run` is deliberate. Non-concurrent commissioning would
+/// bring BLE down, join WiFi and only then be reachable, which needs a larger
+/// `BUMP_SIZE` for the bigger futures and which some ecosystems handle badly.
+/// Running both radios at once is the more expensive configuration, and it is the
+/// one MEASUREMENTS.md measures.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+async fn run_device(
+    flash: esp_hal::peripherals::FLASH<'static>,
+    wifi: esp_hal::peripherals::WIFI<'static>,
+    bt: esp_hal::peripherals::BT<'static>,
+    boot_button: esp_hal::peripherals::GPIO9<'static>,
+) -> ! {
+    use core::pin::pin;
+
+    use embassy_embedded_hal::adapter::BlockingAsync;
+    use esp_bootloader_esp_idf::partitions::{
+        read_partition_table, DataPartitionSubType, PartitionType, PARTITION_TABLE_MAX_LEN,
+    };
+    use esp_hal::gpio::{Input, InputConfig, Pull};
+    use esp_storage::FlashStorage;
+    use rs_matter_embassy::matter::crypto::{default_crypto, Crypto};
+    use rs_matter_embassy::matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM};
+    use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
+    use rs_matter_embassy::matter::utils::select::Coalesce;
+    use rs_matter_embassy::persist::SeqMapKvBlobStore;
+    use rs_matter_embassy::stack::rand::reseeding_csprng;
+    use rs_matter_embassy::wireless::esp::EspWifiDriver;
+    use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
+
+    // Allocated statically: its footprint is 35-50 KB and putting that on the
+    // program stack would blow it, and the wireless stack variation requires a
+    // 'static stack anyway.
+    let stack = mk_static!(EmbassyWifiMatterStack<BUMP_SIZE, ()>).init_with(
+        EmbassyWifiMatterStack::init(&DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT),
+    );
+
+    // A reseeding CSPRNG over the hardware TRNG. `default_crypto` also wants the
+    // device attestation private key, which is the test one — see the README on
+    // why that means this is not a certified device.
+    let crypto = default_crypto(
+        reseeding_csprng(
+            esp_hal::rng::Trng::try_new().expect("a TrngSource is alive"),
+            1000,
+        )
+        .expect("the CSPRNG could not be seeded"),
+        DAC_PRIVKEY,
+    );
+    let weak_rand = crypto.weak_rand().expect("a weak RNG");
+
+    // Load any previously saved fabric state. Only a scratch buffer is needed to
+    // parse the partition table, so it can be a local.
+    let mut table_buffer = [0u8; PARTITION_TABLE_MAX_LEN];
+    let mut flash = FlashStorage::new(flash);
+    let table = read_partition_table(&mut flash, &mut table_buffer[..])
+        .expect("the flash has no readable partition table");
+    let nvs = table
+        .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))
+        .expect("the partition table could not be searched")
+        .expect("the partition table has no nvs partition; see partitions.csv");
+    let range = nvs.offset()..nvs.offset() + nvs.len();
+    info!(
+        "persisting Matter state to nvs partition {:?} at {:#x}..{:#x}",
+        nvs.label_as_str(),
+        range.start,
+        range.end,
+    );
+
+    let mut store = SeqMapKvBlobStore::new(BlockingAsync::new(flash), range);
+    stack
+        .startup(&crypto, &mut store)
+        .await
+        .expect("the Matter stack could not start up");
+    let kv = stack.matter().kv(store);
+
+    if stack.is_commissioned() {
+        info!("already commissioned; hold BOOT (GPIO9) for {RESET_SECS}s to wipe and start over");
+    } else {
+        info!("not commissioned: advertising over BLE");
+        info!("  scan the QR code in README.md, or pair with code 34970112332");
+    }
+
+    {
+        // `pin!` is optional but shrinks the resulting future noticeably.
+        let mut matter = pin!(stack.run_coex(
+            EmbassyWifi::new(
+                EspWifiDriver::new(wifi, bt),
+                weak_rand,
+                true, // a random BLE address, so the device is not trackable across boots
+                stack,
+            ),
+            &crypto,
+            (NODE, rs_matter_embassy::matter::dm::EmptyHandler),
+            &kv,
+            (),
+        ));
+
+        // Whichever finishes first wins: Matter only returns on error, and the
+        // reset watcher only returns when the button has been held long enough.
+        let mut reset = pin!(wait_for_factory_reset(Input::new(
+            boot_button,
+            InputConfig::default().with_pull(Pull::Up),
+        )));
+
+        embassy_futures::select::select(&mut matter, &mut reset)
+            .coalesce()
+            .await
+            .expect("the Matter stack stopped with an error");
+    }
+
+    log::warn!("wiping the persisted Matter state");
+    stack
+        .matter()
+        .reset_persist(kv)
+        .await
+        .expect("the persisted state could not be wiped");
+
+    log::warn!("rebooting");
+    esp_hal::system::software_reset()
+}
+
+/// How long BOOT has to be held to wipe the fabric.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+const RESET_SECS: u64 = 3;
+
+/// Resolves once BOOT has been held low for [`RESET_SECS`].
+///
+/// GPIO9 is the BOOT button on the usual ESP32-C3 boards, and it is pulled up, so
+/// pressed means low. The debounce and the confirmation window exist because a
+/// short press is how you enter the ROM bootloader — wiping a fabric on a stray
+/// press would be a rude surprise.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+async fn wait_for_factory_reset(
+    mut button: esp_hal::gpio::Input<'_>,
+) -> Result<(), rs_matter_embassy::matter::error::Error> {
+    loop {
+        button.wait_for_low().await;
+        embassy_time::Timer::after_millis(50).await;
+        if !button.is_low() {
+            continue;
+        }
+
+        log::warn!("BOOT held: keep it down for {RESET_SECS}s to wipe the Matter state");
+        let outcome = embassy_futures::select::select(
+            button.wait_for_high(),
+            embassy_time::Timer::after_secs(RESET_SECS),
+        )
+        .await;
+
+        if matches!(outcome, embassy_futures::select::Either::Second(())) {
+            return Ok(());
+        }
+        log::info!("BOOT released early; not wiping");
+    }
+}
+
+/// Basic Information for this device.
+///
+/// Vendor ID, product ID and serial number are `rs-matter`'s test values, because
+/// the committed QR code is computed from exactly those — see
+/// tools/matter-qr. The software version is *not* fixed: it carries
+/// [`FIRMWARE_VERSION`], so a commissioner displays the version that came out of
+/// the OCI registry.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+const DEV_DET: rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig = {
+    use rs_matter_embassy::matter::dm::devices::test::TEST_DEV_DET;
+
+    rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig {
+        sw_ver_str: FIRMWARE_VERSION,
+        product_name: "oci-zero OTA demo",
+        device_name: "oci-zero",
+        ..TEST_DEV_DET
+    }
+};
+
+/// The Matter node: the root endpoint and nothing else.
+///
+/// No on-off cluster and no fictitious light. This device's whole function is to
+/// update itself, which Matter models nowhere, so inventing a device type would
+/// only be noise. The root endpoint alone still carries Basic Information,
+/// Network Commissioning and the rest of the system clusters a commissioner needs.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+const NODE: rs_matter_embassy::matter::dm::Node = rs_matter_embassy::matter::dm::Node {
+    endpoints: &[
+        rs_matter_embassy::wireless::EmbassyWifiMatterStack::<0, ()>::root_endpoint(),
+    ],
+};
+
+/// Leaks a zeroed `'static` allocation for `$t`.
+///
+/// `rs-matter-embassy`'s examples define this; the Matter stack has to be
+/// `'static` and must not live on the program stack.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+macro_rules! mk_static {
+    ($t:ty) => {{
+        static CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        CELL.uninit()
+    }};
+}
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+use mk_static;

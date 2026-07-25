@@ -1,0 +1,16 @@
+# Partition table for a 4 MB ESP32-C3.
+#
+# No factory partition: two equal OTA slots instead, so an update always writes
+# the one it is not running from and a bad image can be rolled back to the other.
+# That costs the factory image but buys real A/B updates, which is the point of
+# the demo.
+#
+# nvs holds the Matter fabric and WiFi credentials (see run_device in main.rs).
+# otadata records which slot to boot; erased, the bootloader picks ota_0.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

@@ -2646,6 +2646,7 @@ dependencies = [
 name = "oci-zero-esp32c3-ota"
 version = "0.1.0"
 dependencies = [
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-sync 0.8.0",
