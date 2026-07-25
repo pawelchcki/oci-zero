@@ -2,39 +2,38 @@
 
 Yes, with room to spare in flash and roughly a quarter of DRAM uncommitted.
 
-Reproduce with `./measure.sh`. Numbers below are from
-`rustc 1.95.0`, `opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`,
-`panic = "abort"`, built through `cross` (see [Why cross](#why-cross)).
+Reproduce with `./measure.sh` — plain `cargo`, no container and no C toolchain.
+Numbers below are from `rustc 1.95.0`, `opt-level = "z"`, `lto = "fat"`,
+`codegen-units = 1`, `panic = "abort"`.
 
 | rung       | image (OTA) |    of slot |   .text | .rodata | static RAM |  + heap |   of DRAM | stack headroom |
 | ---------- | ----------: | ---------: | ------: | ------: | ---------: | ------: | --------: | -------------: |
 | `baseline` |      93,872 |       5.1% |  32,746 |  12,480 |     38,164 | 140,564 |     42.9% |        277,860 |
-| `oci`      |     105,664 |       5.8% |  44,416 |  15,408 |     43,464 | 145,864 |     44.5% |        272,688 |
-| `radio`    |     525,872 |      28.7% | 444,538 |  73,924 |     57,580 | 159,980 |     48.8% |        204,528 |
-| `tls`      |     905,872 |      49.4% | 721,042 | 175,692 |     66,644 | 169,044 |     51.6% |        195,592 |
-| `matter`   |     529,472 |      28.9% | 446,062 |  75,956 |    135,820 | 238,220 |     72.7% |        126,288 |
-| **`full`** | **909,296** |  **49.6%** | 722,384 | 177,732 |    144,892 | 247,292 | **75.5%** |    **117,344** |
+| `oci`      |     105,632 |       5.8% |  44,382 |  15,404 |     43,468 | 145,868 |     44.5% |        272,684 |
+| `tls`      |     344,416 |      18.8% | 283,162 |  34,688 |     69,436 | 171,836 |     52.4% |        246,716 |
+| `radio`    |     525,952 |      28.7% | 444,624 |  73,916 |     57,580 | 159,980 |     48.8% |        204,528 |
+| `matter`   |     529,504 |      28.9% | 446,088 |  75,956 |    135,820 | 238,220 |     72.7% |        126,288 |
+| **`full`** | **801,072** |  **43.7%** | 695,192 |  97,244 |    167,108 | 269,508 | **82.2%** |     **95,128** |
 
 Budgets: one OTA slot of 1,835,008 bytes (1.75 MB, two slots plus
 `nvs`/`otadata`/`phy_init` in 4 MB); 327,680 bytes of usable DRAM; a 100 KB heap.
 
 `full` is the rung that decides: esp-hal + esp-radio (Wifi **and** BLE) +
-`rs-matter-embassy` + `oci-zero` with `tls` and `gzip`, with mbedTLS's handshake
-genuinely linked (770 mbedTLS symbols in the image).
+`rs-matter-embassy` + `oci-zero` + a verified `embedded-tls` handshake.
 
 ## What each layer costs
+
+Static RAM is very nearly additive — the five rows below sum to 167,092 against
+`full`'s 167,108 — so each is the layer's own cost. Flash is not quite, because
+LTO shares code between layers; the rows sum about 21 KB below `full`.
 
 | layer                          |        flash |  static RAM |
 | ------------------------------ | -----------: | ----------: |
 | esp-hal + esp-rtos + heap      |       93,872 |      38,164 |
-| `oci-zero` (pull + gzip)       | **+11,792** | **+5,300** |
-| esp-radio (Wifi + BLE)         |    +420,208 |     +14,116 |
-| mbedTLS (TLS 1.2/1.3 + X.509)  | **+380,000** |     +9,064 |
-| Matter stack                   |      +3,424 | **+78,248** |
-
-Each row is the cost over the rung below it. `matter` in the table above is
-measured without TLS, which is why it looks cheap in flash there; the Matter row
-here is `full` minus `tls`.
+| `oci-zero` (pull + gzip)       | **+11,760** | **+5,304** |
+| `embedded-tls` (TLS 1.3 + PKI) |    +238,784 |     +25,968 |
+| esp-radio (Wifi + BLE)         |    +432,080 |     +19,416 |
+| Matter stack                   |      +3,552 | **+78,240** |
 
 Two things stand out, and both are the opposite of what the plan assumed:
 
@@ -42,26 +41,66 @@ Two things stand out, and both are the opposite of what the plan assumed:
   what an allocation-free streaming design buys. It is the cheapest layer here by
   more than an order of magnitude.
 - **Flash was never the risk.** The plan worried about the 1.75 MB OTA slot;
-  the answer uses half of one. Radio and mbedTLS dominate, and neither is
+  the answer uses well under half of one. Radio and TLS dominate, and neither is
   negotiable.
 
-The real constraint is **static RAM, and it is Matter's**: 78 KB of the 145 KB of
-statics is the Matter stack, matching `rs-matter-embassy`'s own "~35 to 50KB"
-estimate plus the 20 KB bump allocator and the embassy task arena.
+The real constraint is **static RAM, and most of it is Matter's**: 78 KB of the
+167 KB of statics is the Matter stack, matching `rs-matter-embassy`'s own "~35 to
+50KB" estimate plus the 20 KB bump allocator and the embassy task arena.
+`embedded-tls`'s 26 KB is almost entirely its two record buffers.
+
+## Why embedded-tls and not mbedTLS
+
+`oci-zero`'s `tls` feature is an mbedTLS connector, and mbedTLS is C. Measured
+both ways, on the `full` rung:
+
+| |          flash | static RAM | stack headroom | build needs |
+| --- | ---: | ---: | ---: | --- |
+| mbedTLS      | 909,296 |    144,892 |        117,344 | cmake, a RISC-V-capable clang, a container on macOS |
+| embedded-tls | **801,072** | 167,108 |     95,128 | `cargo build` |
+
+embedded-tls costs 108 KB less flash and 22 KB more static RAM — the RAM being
+its record buffers, which mbedTLS kept on the heap instead, so the difference is
+partly bookkeeping. What it really buys is that **no C is compiled at all**: no
+cmake, no `riscv32-esp-elf-gcc`, no clang-with-a-RISC-V-backend, no container,
+and no libc for mbedTLS's `printf`/`puts`/`snprintf`/`vsnprintf`. `cargo build`
+works on any host.
+
+`oci-zero` needed no change. Its `reqwless` adapter is transport-agnostic —
+`send_on` takes any `Read + Write` — so an `embedded_tls::TlsConnection` plugs
+straight in, and the mbedTLS-specific `tls` feature simply goes unused here.
+
+### What still has to be settled
+
+- **Certificate validity dates are not checked.** The verifier is instantiated
+  with `NoClock`, which skips them. A real clock is needed, and the device has no
+  RTC across reboots — Matter commissioning or an SNTP query has to supply one.
+- **The trust anchor is a placeholder.** `CA_CERTIFICATE` is zeroed bytes sized
+  like a real root, enough to measure the verifier's code and buffers. Chunk 6
+  has to pin the actual roots: `ghcr.io` is Sectigo-issued and the blob redirect
+  lands on `pkg-containers.githubusercontent.com`, which is Let's Encrypt.
+- **RSA is mandatory, and its speed on this core is unmeasured.** Both hosts
+  serve RSA certificates signed `sha256WithRSAEncryption`, so an ECDSA-only
+  verifier cannot validate either chain. Pure-Rust RSA verification on a 160 MHz
+  RISC-V core with no hardware bignum accelerator may take appreciable time; this
+  is the main thing hardware testing has to confirm.
+- **TLS 1.3 only.** Both hosts support it.
+
+## `spin` and the missing A extension
+
+`rsa` reaches `spin` through num-bigint-dig and lazy_static, and spin's default
+uses `core::sync::atomic` compare-exchange — which riscv32imc does not have,
+the chip having no A extension. spin's `portable_atomic` feature routes those
+through `portable-atomic` instead, which esp-hal already configures for a single
+core, so `spin` is depended on directly for the sole purpose of turning that
+feature on.
 
 ## What is left for Chunk 6
 
-117 KB of stack headroom and 100 KB of heap, against:
-
-- mbedTLS record buffers, the largest remaining unknown. Defaults are 16 KB in
-  and 16 KB out; `MBEDTLS_SSL_MAX_FRAGMENT_LENGTH` can cut that hard if needed.
-- `PullBuffers`. The measurement uses 2 KB root manifest + 2 KB child manifest +
-  512 B config, which is generous for an artifact whose manifest is ~630 bytes.
-- The gzip history window, 32 KB, already counted in the `oci` rung.
-
-So ~32 KB of TLS buffers plus ~5 KB of pull buffers against 117 KB of headroom.
-That fits, and the fallback ladder in the plan (shrink record buffers, drop BLE
-after commissioning, single OTA slot) is not needed.
+95 KB of stack headroom and 100 KB of heap, against `PullBuffers` — 2 KB root
+manifest + 2 KB child manifest + 512 B config in the measurement, generous for an
+artifact whose manifest is ~630 bytes — and the embassy-net socket buffers the TLS
+stream will sit on. The gzip history window, 32 KB, is already counted.
 
 **`headroom` is not a reservation.** esp-hal's linker script gives `.stack`
 whatever DRAM is left after every static, so it shrinks as statics grow. It is
@@ -75,53 +114,19 @@ one number in the plan's Chunk 4 list that this report cannot supply.
 1. **"TLS already cross-compiles for the target… clang cross-compiles
    `mbedtls-rs-sys`'s C with no `riscv32-esp-elf-gcc` needed" — wrong.** No C was
    compiled at all: crates.io's `mbedtls-rs-sys` ships *prebuilt* `.a` files for
-   `riscv32imc-unknown-none-elf`, which is why that build took 7 seconds. Those
-   prebuilt libraries also have no esp-hal hooks. Building the esp-aware fork from
-   source does need a RISC-V-capable C compiler, and Apple's `/usr/bin/clang` has
-   no RISC-V backend — hence `cross`.
+   `riscv32imc-unknown-none-elf`, which is why that build took 7 seconds, and they
+   carry no esp-hal hooks. Building the esp-aware fork from source needs a
+   RISC-V-capable C compiler, which macOS does not have. Moot now: there is no C.
 2. **`rs-matter-embassy` is not published.** Its crates.io entry is a `0.0.0`
    placeholder; it is pinned here by git revision, as are the esp-hal crates,
    because it tracks esp-hal's git tree rather than its releases.
-3. **Matter does not need mbedTLS.** `rs-matter-embassy`'s default `rustcrypto`
-   backend works, so Matter and `oci-zero` do not have to share a crypto stack.
-   Given that flash is abundant, that is the simpler choice and it is what these
-   numbers reflect.
-4. **The zstd-versus-gzip worry was unnecessary.** gzip remains the default, but
-   the reason is no longer "the Matter budget cannot afford a zstd window" — with
-   117 KB of headroom it probably could. gzip stays because it is smaller and
-   nothing needs zstd.
-
-## Why cross
-
-mbedTLS is compiled from source for `riscv32imc-unknown-none-elf`. That needs a C
-compiler with a RISC-V backend, and macOS's system clang has none:
-
-    error: unable to create target: 'No available targets are compatible with
-    triple "riscv32-unknown-unknown"'
-
-A Linux clang has every LLVM backend, so the build happens in a container. See
-`Cross.toml` and `Dockerfile.cross`. Two wrinkles worth knowing:
-
-- `cross` does not read `[build] target` from `.cargo/config.toml`, so
-  `--target riscv32imc-unknown-none-elf` has to be passed explicitly.
-- `cross` only mounts the `oci-zero` path dependency when it is an *active*
-  dependency, but cargo reads an optional path dependency's manifest either way.
-  `Cross.toml` mounts it unconditionally via `OCI_ZERO_ROOT`, which `measure.sh`
-  exports.
-
-## Why `tls` implies `radio`
-
-mbedTLS's C calls `printf`, `puts`, `snprintf` and `vsnprintf` from its
-diagnostic paths, and `riscv32imc-unknown-none-elf` has no libc. Those four are
-the only libc symbols missing, and esp-radio brings the ESP32-C3 ROM's libc,
-which defines all of them — so the `tls` feature depends on `radio` and the link
-succeeds. `tinyrlibc` is therefore only needed by the Matter half of the graph.
-
-The dependency is also honest rather than a workaround: TLS with no network is
-not a configuration this firmware ever wants.
-
-The alternative was to stop `MBEDTLS_DEBUG_C` being defined at all, which would
-mean giving `oci-zero` granular mbedTLS feature pass-through instead of
-requesting `mbedtls-rs`'s `tls` bundle. That would shave some of the 380 KB, but
-it changes the published crate's feature surface and `Tls::set_debug` would become
-a no-op for every consumer, so it is deliberately not done here.
+3. **Nothing needs mbedTLS.** `rs-matter-embassy` defaults to `rustcrypto`, and
+   the OCI path uses `embedded-tls`, so the whole firmware is pure Rust apart from
+   esp-radio's binary PHY blobs.
+4. **The zstd-versus-gzip worry was unnecessary.** gzip stays because it is
+   smaller and nothing needs zstd, not because RAM forces it.
+5. **`esp-bootloader-esp-idf` is not ESP-IDF C.** It is a pure-Rust
+   implementation of the IDF bootloader's partition table and app-descriptor
+   formats. It stays, because the OTA slot switching and the `esp_app_desc!()`
+   version the flasher page reads back both depend on those formats, and the
+   second-stage bootloader in flash is Espressif's either way.

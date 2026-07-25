@@ -13,10 +13,6 @@ set -eu
 cd "$(dirname "$0")"
 
 TARGET=riscv32imc-unknown-none-elf
-# Mounted into the cross container; see the comment in Cross.toml.
-OCI_ZERO_ROOT=$(cd ../.. && pwd)
-export OCI_ZERO_ROOT
-BUILD=${OCI_ZERO_BUILD:-cross}
 ELF=target/$TARGET/release/oci-zero-esp32c3-ota
 IMAGE=target/measure-image.bin
 
@@ -35,15 +31,12 @@ for features in "" oci radio tls matter full; do
     label=${features:-baseline}
     start=$(date +%s)
 
-    # cross, not cargo: mbedTLS is compiled from source for riscv32 and needs a
-    # C compiler with a RISC-V backend, which macOS does not have. `cross` does
-    # not read `[build] target` from .cargo/config.toml, so name it explicitly.
     if [ -z "$features" ]; then
-        set -- --release --target "$TARGET"
+        set -- --release
     else
-        set -- --release --target "$TARGET" --features "$features"
+        set -- --release --features "$features"
     fi
-    if ! $BUILD build "$@" >/dev/null 2>&1; then
+    if ! cargo build "$@" >/dev/null 2>&1; then
         printf '%-10s%s\n' "$label" "  BUILD FAILED — rerun without the redirect to see why"
         continue
     fi

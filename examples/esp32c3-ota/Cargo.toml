@@ -19,12 +19,9 @@ default = []
 # rung is built on its own so the cost of each layer is attributable rather than
 # lumped into one number.
 oci = ["dep:oci-zero"]
-# Depends on `radio`, and not only because TLS without a network is pointless on
-# this chip: mbedTLS's C calls printf, puts, snprintf and vsnprintf from its
-# diagnostic paths, and this target has no libc of its own. esp-radio brings the
-# ESP32-C3 ROM's libc, which defines all four. Without `radio` the link fails on
-# exactly those symbols.
-tls = ["oci", "radio", "dep:mbedtls-rs", "dep:mbedtls-rs-sys", "dep:embedded-io-async", "dep:embedded-nal-async"]
+# Pure Rust, and therefore no C toolchain, no cmake and no container: see
+# MEASUREMENTS.md. embedded-tls is TLS 1.3 only, which GHCR speaks.
+tls = ["oci", "dep:embedded-tls", "dep:embedded-io-async", "dep:spin"]
 radio = ["dep:esp-radio", "esp-rtos/esp-radio"]
 matter = ["radio", "dep:rs-matter-embassy", "dep:tinyrlibc", "dep:static_cell"]
 # Everything the finished firmware will contain. This is the rung the decision
@@ -53,68 +50,37 @@ rs-matter-embassy = { git = "https://github.com/ivmarkov/rs-matter-embassy.git",
 static_cell = { version = "2", optional = true }
 tinyrlibc = { version = "0.5", default-features = false, features = ["memchr", "utoa", "strtoul"], optional = true }
 
-# gzip, not zstd: a Zstandard window cannot be afforded next to the Matter stack,
-# which is why tools/build-firmware-artifact.sh defaults to gzip.
-oci-zero = { path = "../..", default-features = false, features = ["tls", "gzip"], optional = true }
-# Direct dependencies only so the measurement can name the types
-# `oci_zero::tls::connect` is generic over and force it to be monomorphised.
-# The finished firmware reaches these through oci-zero, not directly.
-mbedtls-rs = { version = "0.1", default-features = false, features = ["tls"], optional = true }
-# Depended on directly only to select its features: `[patch]` redirects a crate
-# but cannot turn features on. `esp32c3` is the one that matters — it installs
-# esp-hal's hardware SHA and bignum hooks and the time hooks X.509 validation
-# needs, which is what "mbedtls-rs works on esp" means in practice. `tls` picks
-# the TLS-client config profile rather than the full kitchen sink.
-mbedtls-rs-sys = { version = "0.1", default-features = false, optional = true, features = [
-    # esp-hal hooks: hardware SHA and bignum acceleration, plus the time hooks
-    # X.509 validity checking needs. This is what "mbedtls-rs works on esp" means.
-    "esp32c3",
-    "hook-wall-clock",
-    # The `tls` profile enumerated by hand, minus four things. Deliberately kept
-    # otherwise wide: the point of the measurement is an upper bound, so trimming
-    # ciphers and curves is left as known headroom rather than assumed.
-    #
-    # Omitted, and why:
-    #   tls-debug   - debug.c and the config sanity checks are the only callers of
-    #                 vsnprintf, printf and puts, none of which exist on a target
-    #                 with no libc. Dropping it is what makes this link.
-    #   x509-write  - certificate and CSR *generation*; a pull-only client parses
-    #                 chains, it never issues them.
-    #   pem-write   - likewise, encoding PEM rather than reading it.
-    #   pkcs7       - signature-envelope parsing nothing here touches.
-    "alg-sha256", "alg-sha512", "alg-sha1", "alg-md5", "alg-ripemd160",
-    "alg-aes", "alg-des", "alg-aria", "alg-camellia", "alg-chacha20",
-    "cipher-mode-cbc", "cipher-mode-cfb", "cipher-mode-ofb", "cipher-mode-ctr",
-    "cipher-mode-xts",
-    "alg-gcm", "alg-ccm", "alg-cmac", "alg-chachapoly", "alg-nist-kw",
-    "alg-rsa", "alg-rsa-pss", "alg-dhm", "alg-ecp", "alg-ecdh", "alg-ecdsa",
-    "alg-ecjpake", "pk",
-    "curve-secp192r1", "curve-secp224r1", "curve-secp256r1", "curve-secp384r1",
-    "curve-secp521r1", "curve-secp192k1", "curve-secp224k1", "curve-secp256k1",
-    "curve-bp256r1", "curve-bp384r1", "curve-bp512r1", "curve-curve25519",
-    "curve-curve448",
-    "alg-hkdf", "alg-pkcs5", "alg-pkcs12", "drbg-ctr", "drbg-hmac", "entropy",
-    "base64", "pem-parse", "x509-parse",
-    "tls-core", "tls-client", "tls-server", "tls-cache", "tls-ticket",
-    "tls-proto-tls12", "tls-proto-tls13", "tls-proto-dtls",
-    "kex-psk", "kex-ecdhe-ecdsa", "kex-ecdhe-rsa", "kex-ecdh-ecdsa",
-    "kex-ecdh-rsa", "kex-rsa", "kex-rsa-psk", "kex-dhe-rsa", "kex-dhe-psk",
-    "kex-ecdhe-psk",
-] }
+# `reqwless`, not `tls`: oci-zero's `tls` feature is its mbedTLS connector, and
+# mbedTLS is C. The reqwless adapter is transport-agnostic — `send_on` takes any
+# `Read + Write` — so an embedded-tls stream plugs straight in with no change to
+# the library.
+#
+# gzip, not zstd: gzip is smaller and nothing here needs zstd.
+oci-zero = { path = "../..", default-features = false, features = ["reqwless", "gzip"], optional = true }
+# A verified TLS 1.3 client with no allocator and no C. `rustpki` is the no_std
+# certificate verifier (`webpki` is std-only); `p384` and `rsa` cover the
+# signature schemes a public CA chain actually uses, since the default is P-256
+# alone.
+embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "p384", "rsa"], optional = true }
+# For the stand-in socket the TLS rung hands to embedded-tls.
 embedded-io-async = { version = "0.7", default-features = false, optional = true }
-embedded-nal-async = { version = "0.9", optional = true }
+# `rsa` is not optional in practice: both ghcr.io and the blob-redirect host
+# pkg-containers.githubusercontent.com serve RSA certificates signed
+# sha256WithRSAEncryption, so an ECDSA-only verifier could not validate either
+# chain.
+#
+# It reaches `spin` through num-bigint-dig and lazy_static, and spin's default
+# uses `core::sync::atomic` compare-exchange — which riscv32imc does not have, the
+# chip having no A extension. spin's `portable_atomic` feature routes those
+# through portable-atomic instead, which esp-hal already configures for a single
+# core. Depended on only to turn that feature on via feature unification.
+spin = { version = "0.9", default-features = false, features = ["portable_atomic", "lazy", "once", "mutex", "spin_mutex", "lock_api"], optional = true }
 
 # rs-matter-embassy tracks esp-hal's git tree rather than its releases, and the
 # esp-aware mbedTLS lives in esp-rs's fork. These are the same pins its own
 # examples/esp use; without them the graph does not resolve.
 #
-# The fork matters beyond version skew: crates.io's mbedtls-rs-sys ships
-# *prebuilt* libraries for riscv32imc, compiled with a config that references
-# printf and puts and offers no esp-hal hooks. The fork builds from source, so
-# the config is ours and the hardware crypto hooks exist. Building from source
-# needs a C compiler with a RISC-V backend — see riscv32-cc.sh.
 [patch.crates-io]
-mbedtls-rs-sys = { git = "https://github.com/esp-rs/mbedtls-rs", rev = "3847098439f7f58972852164e9c21fc3ec4194ce" }
 esp-hal = { git = "https://github.com/esp-rs/esp-hal", rev = "10e48dd74837bae4be663a7d1825d12875363727" }
 esp-rtos = { git = "https://github.com/esp-rs/esp-hal", rev = "10e48dd74837bae4be663a7d1825d12875363727" }
 esp-alloc = { git = "https://github.com/esp-rs/esp-hal", rev = "10e48dd74837bae4be663a7d1825d12875363727" }

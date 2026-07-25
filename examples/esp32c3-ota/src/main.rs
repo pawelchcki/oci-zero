@@ -61,17 +61,27 @@ async fn main(_spawner: embassy_executor::Spawner) {
     info!("oci-zero esp32c3-ota measurement build");
     info!("heap {} bytes, {} reclaimed", HEAP_SIZE, RECLAIMED_RAM);
 
+    // One TRNG source for the whole program: `Trng::try_new()` only succeeds
+    // while a `TrngSource` is alive, and both the TLS handshake and Matter's
+    // crypto provider want one. Leaked rather than dropped, because dropping it
+    // would turn the hardware RNG off again.
+    #[cfg(any(feature = "tls", feature = "matter"))]
+    core::mem::forget(esp_hal::rng::TrngSource::new(
+        peripherals.RNG,
+        peripherals.ADC1,
+    ));
+
     #[cfg(feature = "oci")]
     reference_oci_zero().await;
 
     #[cfg(feature = "tls")]
-    reference_tls();
+    reference_tls().await;
 
     #[cfg(feature = "radio")]
     reference_radio(peripherals.WIFI, peripherals.BT);
 
     #[cfg(feature = "matter")]
-    reference_matter(peripherals.RNG, peripherals.ADC1);
+    reference_matter();
 
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
@@ -220,134 +230,138 @@ const CONFIG: [u8; 108] = *br#"{"chip":"esp32c3","target":"riscv32imc-unknown-no
 #[cfg(feature = "oci")]
 const LAYER: [u8; 1024] = [0; 1024];
 
-/// Forces `oci_zero::tls::connect` to be monomorphised, which is what links
-/// mbedTLS's handshake, X.509 and cipher code into the image.
+/// Drives a real `embedded-tls` handshake, with certificate verification, over a
+/// stream that fails on first read.
 ///
-/// The call is *linked but never executed*: `opaque_none` returns `None` behind
-/// a `black_box`, so LTO cannot see that the branch is dead and must emit the
-/// future's `poll`, while at runtime the branch is never taken. That avoids
-/// needing a real socket, a real CA chain and the mbedTLS C allocator hooks —
-/// all of which are Chunk 6's job — while still costing what Chunk 6 will cost.
+/// Unlike the other rungs this needs no trick to defeat dead-code elimination:
+/// every input is constructible here, so the handshake is genuinely entered and
+/// then fails at the first socket read. That links the record layer, the key
+/// schedule, the X.509 chain verifier and the signature backends — which is the
+/// whole cost of TLS on this part.
 ///
-/// The socket traits are implemented here rather than taken from embassy-net
-/// because the generic parameters only affect the thin socket glue; the mbedTLS
-/// code that dominates the measurement is identical either way.
+/// This is also where the C went. mbedTLS would have needed a cmake build, a
+/// RISC-V-capable clang and four libc symbols this target does not have;
+/// `embedded-tls` is pure Rust, so `cargo build` works on any host. `oci-zero`
+/// needs no change either: its reqwless adapter takes any `Read + Write`, so a
+/// `TlsConnection` plugs straight in.
 #[cfg(feature = "tls")]
-fn reference_tls() {
-    use core::net::{IpAddr, SocketAddr};
-
+async fn reference_tls() {
     use embedded_io_async::{ErrorType, Read, Write};
-    use embedded_nal_async::{AddrType, Dns, TcpConnect};
+    use embedded_tls::pki::CertVerifier;
+    use embedded_tls::{
+        Aes128GcmSha256, Certificate, CryptoProvider, NoClock, TlsConfig, TlsConnection,
+        TlsContext, TlsVerifier,
+    };
+
+    /// Read buffer. TLS 1.3 permits a 16 KB plaintext record, and a client cannot
+    /// ask a server for less — embedded-tls implements no max_fragment_length
+    /// extension — so this has to hold a full record or a large response would
+    /// fail mid-stream. It is the single largest RAM cost of the TLS layer.
+    const READ_BUFFER: usize = 16 * 1024 + 256;
+    /// Write buffer. Sized for what this firmware actually sends: a GET request
+    /// with a bearer token, well under 2 KB. Nothing here uploads.
+    const WRITE_BUFFER: usize = 2 * 1024 + 256;
+    /// Scratch for one certificate while the chain is walked.
+    const CERT_BUFFER: usize = 4096;
 
     #[derive(Debug)]
-    struct Never;
+    struct Closed;
 
-    impl core::fmt::Display for Never {
+    impl core::fmt::Display for Closed {
         fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.write_str("never")
+            formatter.write_str("the measurement stub has no socket")
         }
     }
 
-    impl core::error::Error for Never {}
+    impl core::error::Error for Closed {}
 
-    impl embedded_io_async::Error for Never {
+    impl embedded_io_async::Error for Closed {
         fn kind(&self) -> embedded_io_async::ErrorKind {
-            embedded_io_async::ErrorKind::Other
+            embedded_io_async::ErrorKind::ConnectionReset
         }
     }
 
-    struct NeverStream;
+    /// Stands in for the embassy-net socket Chunk 6 will supply. Writing
+    /// succeeds so the ClientHello is actually built and encrypted; reading fails,
+    /// so the handshake ends where the network would have begun.
+    struct ClosedStream;
 
-    impl ErrorType for NeverStream {
-        type Error = Never;
+    impl ErrorType for ClosedStream {
+        type Error = Closed;
     }
 
-    impl Read for NeverStream {
-        async fn read(&mut self, _buffer: &mut [u8]) -> Result<usize, Self::Error> {
-            Err(Never)
+    impl Read for ClosedStream {
+        async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+            core::hint::black_box(&buffer);
+            Err(Closed)
         }
     }
 
-    impl Write for NeverStream {
-        async fn write(&mut self, _bytes: &[u8]) -> Result<usize, Self::Error> {
-            Err(Never)
+    impl Write for ClosedStream {
+        async fn write(&mut self, bytes: &[u8]) -> Result<usize, Self::Error> {
+            Ok(core::hint::black_box(bytes).len())
         }
 
         async fn flush(&mut self) -> Result<(), Self::Error> {
-            Err(Never)
+            Ok(())
         }
     }
 
-    struct NeverTcp;
+    /// Pairs the hardware TRNG with the X.509 chain verifier. esp-hal already
+    /// implements the `rand_core` 0.6 traits embedded-tls wants for `Trng`, so no
+    /// adapter is needed.
+    struct VerifyingProvider {
+        rng: esp_hal::rng::Trng,
+        verifier: CertVerifier<'static, Aes128GcmSha256, NoClock, CERT_BUFFER>,
+    }
 
-    // DNS and connect must *succeed*, or LLVM proves everything past them
-    // unreachable and folds the handshake away — leaving only mbedTLS's drop
-    // glue in the image, which is exactly what this rung measured before.
-    // Reading and writing may still fail: by then `Session::new` and
-    // `session.connect()` have already been linked.
-    impl TcpConnect for NeverTcp {
-        type Error = Never;
-        type Connection<'a> = NeverStream;
+    impl CryptoProvider for VerifyingProvider {
+        type CipherSuite = Aes128GcmSha256;
+        // Never used: no client certificate is offered, so nothing signs.
+        type Signature = [u8; 64];
 
-        async fn connect<'a>(
-            &'a self,
-            _remote: SocketAddr,
-        ) -> Result<Self::Connection<'a>, Self::Error> {
-            Ok(NeverStream)
+        fn rng(&mut self) -> impl embedded_tls::CryptoRngCore {
+            &mut self.rng
+        }
+
+        fn verifier(
+            &mut self,
+        ) -> Result<&mut impl TlsVerifier<Self::CipherSuite>, embedded_tls::TlsError> {
+            Ok(&mut self.verifier)
         }
     }
 
-    struct NeverDns;
+    let Ok(trng) = esp_hal::rng::Trng::try_new() else {
+        info!("tls: no TRNG available");
+        return;
+    };
 
-    impl Dns for NeverDns {
-        type Error = Never;
+    let mut read_record = [0u8; READ_BUFFER];
+    let mut write_record = [0u8; WRITE_BUFFER];
+    let config = TlsConfig::new()
+        .with_server_name("ghcr.io")
+        .enable_rsa_signatures();
+    let mut connection = TlsConnection::new(ClosedStream, &mut read_record, &mut write_record);
+    let provider = VerifyingProvider {
+        rng: trng,
+        verifier: CertVerifier::new(Certificate::X509(core::hint::black_box(CA_CERTIFICATE))),
+    };
 
-        async fn get_host_by_name(
-            &self,
-            _host: &str,
-            _addr_type: AddrType,
-        ) -> Result<IpAddr, Self::Error> {
-            Ok(core::hint::black_box(IpAddr::V4(core::net::Ipv4Addr::new(
-                127, 0, 0, 1,
-            ))))
-        }
-
-        async fn get_host_by_address(
-            &self,
-            _addr: IpAddr,
-            _result: &mut [u8],
-        ) -> Result<usize, Self::Error> {
-            Err(Never)
-        }
-    }
-
-    // Opaque to the optimiser, always `None` at runtime.
-    fn opaque_none<T>() -> Option<T> {
-        core::hint::black_box(None)
-    }
-
-    let mut linked = false;
-    if let Some((tls, ca_chain, server_name, target)) = opaque_none::<(
-        mbedtls_rs::TlsReference<'static>,
-        mbedtls_rs::Certificate<'static>,
-        &'static core::ffi::CStr,
-        oci_zero::registry::Target<'static>,
-    )>() {
-        // Polled, not merely constructed. Creating a future does not call its
-        // `poll`, so LTO would drop the handshake body as unreachable and the
-        // rung would measure nothing — which it did, until this line existed.
-        let future =
-            oci_zero::tls::connect(tls, &NeverTcp, &NeverDns, target, server_name, ca_chain);
-        let mut future = core::pin::pin!(future);
-        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
-        linked = core::future::Future::poll(future.as_mut(), &mut context).is_pending();
-    }
-
+    let outcome = connection.open(TlsContext::new(&config, provider)).await;
     info!(
-        "mbedTLS handshake path linked: {}",
-        core::hint::black_box(linked)
+        "tls: handshake reached the socket ({:?}), buffers {} read + {} write",
+        outcome.err(),
+        READ_BUFFER,
+        WRITE_BUFFER,
     );
 }
+
+/// Placeholder trust anchor. Sized like a real root so the verifier's buffers and
+/// code paths are measured, but it is not a usable CA: Chunk 6 has to pin the
+/// actual root for `ghcr.io` and the blob-redirect host, and supply a real clock
+/// so validity dates are checked at all — `NoClock` skips them.
+#[cfg(feature = "tls")]
+const CA_CERTIFICATE: &[u8] = &[0; 1200];
 
 /// Constructs the Wifi and BLE controllers, which is what pulls esp-radio's
 /// driver code and PHY blobs into the image. Both are needed at once: BLE
@@ -378,10 +392,7 @@ fn reference_radio(
 /// Allocates the Matter stack exactly as `rs-matter-embassy`'s own example does,
 /// so the measurement covers its real static footprint rather than a stub's.
 #[cfg(feature = "matter")]
-fn reference_matter(
-    rng: esp_hal::peripherals::RNG<'static>,
-    adc1: esp_hal::peripherals::ADC1<'static>,
-) {
+fn reference_matter() {
     use rs_matter_embassy::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
     use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
     use rs_matter_embassy::wireless::EmbassyWifiMatterStack;
@@ -395,14 +406,10 @@ fn reference_matter(
         &TEST_DEV_ATT,
     ));
 
-    // The TRNG is the entropy source the crypto provider will reseed from.
-    let trng = esp_hal::rng::TrngSource::new(rng, adc1);
-
     info!(
         "matter stack: {} bytes static, bump {} bytes",
         core::mem::size_of::<EmbassyWifiMatterStack<BUMP_SIZE, ()>>(),
         BUMP_SIZE,
     );
     core::hint::black_box(stack);
-    core::mem::forget(trng);
 }

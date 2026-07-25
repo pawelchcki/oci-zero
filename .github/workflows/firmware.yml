@@ -50,17 +50,6 @@ jobs:
           toolchain: "1.95.0"
           targets: ${{ env.TARGET }}
 
-      # mbedTLS is compiled from source for riscv32. A Linux clang has every LLVM
-      # backend, so no Espressif GCC toolchain is needed and `cross` is
-      # unnecessary here — unlike on macOS, where the system clang has no RISC-V
-      # backend. See examples/esp32c3-ota/MEASUREMENTS.md.
-      - name: Install a C toolchain for riscv32
-        run: |
-          set -eu
-          sudo apt-get update
-          sudo apt-get install --assume-yes --no-install-recommends clang cmake libclang-dev
-          clang --print-targets | grep -q riscv32
-
       - name: Install espflash and crane
         run: |
           set -eu
@@ -88,11 +77,10 @@ jobs:
           echo "version=${crate}+sha.${short}" >> "$GITHUB_OUTPUT"
           echo "short=${short}" >> "$GITHUB_OUTPUT"
 
+      # Nothing in this crate compiles C, so no clang, cmake or Espressif GCC
+      # toolchain is needed. See examples/esp32c3-ota/MEASUREMENTS.md.
       - name: Build firmware
         working-directory: examples/esp32c3-ota
-        env:
-          CLANG_PATH: /usr/bin/clang
-          CC_riscv32imc_unknown_none_elf: clang
         run: cargo build --release --target "$TARGET" --features full
 
       - name: Save flashable image

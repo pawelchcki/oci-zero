@@ -25,7 +25,11 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; }
+/* `min-width: 320px` alone overflows horizontally at a 320px viewport as soon as
+   a vertical scrollbar appears, because the scrollbar narrows the content box
+   below 320px while the body refuses to follow. Capping at 100% keeps the
+   collapse guard without ever forcing the body wider than the viewport. */
+body { margin: 0; min-width: min(320px, 100%); }
 button, input, select { font: inherit; }
 button {
   border: 0;

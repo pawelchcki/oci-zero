@@ -15,13 +15,11 @@ pins, excluded from the repository root's workspace *and* package so
 `cargo build --workspace` and `cargo package -p oci-zero` are unaffected.
 
 ```console
-export OCI_ZERO_ROOT=$(cd ../.. && pwd)
-cross build --release --target riscv32imc-unknown-none-elf --features full
+cargo build --release --features full
 ```
 
-`cross` rather than `cargo`, because mbedTLS is compiled from source for
-riscv32 and needs a C compiler with a RISC-V backend, which macOS does not
-have. Without the `tls` feature a plain `cargo build` works fine.
+Plain `cargo` on any host: nothing here compiles C. `.cargo/config.toml` sets the
+target, so `--target` is optional.
 
 To take the measurements:
 
@@ -39,7 +37,7 @@ layer that spends it rather than reporting one unactionable number.
 | *(none)*   | esp-hal, esp-rtos, esp-alloc, the heap                      |
 | `oci`      | `oci-zero`'s `pull()` walk and gzip decoder                  |
 | `radio`    | esp-radio Wifi **and** BLE controllers                       |
-| `tls`      | mbedTLS via `oci_zero::tls::connect` (implies `radio`)        |
+| `tls`      | a verified `embedded-tls` 1.3 handshake                       |
 | `matter`   | `rs-matter-embassy`'s `EmbassyWifiMatterStack`                |
 | `full`     | everything — the rung the decision rests on                   |
 
@@ -48,8 +46,7 @@ dependency nothing calls is discarded entirely, so a rung that only adds a
 `Cargo.toml` line measures nothing — which is exactly what the first two attempts
 at this measurement did. Every `reference_*` function in `src/main.rs` exists to
 drag real code paths into the linked image; see the comments there for how each
-one defeats dead-code elimination, and why the mbedTLS rung has to *poll* a
-future rather than merely construct one.
+one defeats dead-code elimination.
 
 ## Pinned dependencies
 
@@ -57,13 +54,14 @@ future rather than merely construct one.
   `0.0.0` placeholder, and it tracks esp-hal's git tree rather than its releases.
 - The esp-hal family is pinned to the same revision `rs-matter-embassy`'s own
   `examples/esp` uses, because that is what its API expects.
-- `mbedtls-rs-sys` is pinned to esp-rs's fork. crates.io's version ships
-  *prebuilt* riscv32imc libraries with no esp-hal hooks; the fork builds from
-  source, so the mbedTLS config is ours and the hardware SHA, bignum and time
-  hooks exist.
-- Matter uses `rs-matter-embassy`'s default `rustcrypto` backend rather than
-  mbedTLS. Sharing one crypto stack would save flash, and flash is the resource
-  there is most of.
+- TLS is `embedded-tls`, not `oci-zero`'s mbedTLS connector, and Matter uses
+  `rs-matter-embassy`'s default `rustcrypto` backend. The firmware is therefore
+  pure Rust apart from esp-radio's binary PHY blobs. See MEASUREMENTS.md for what
+  that costs and what it still leaves unsettled — notably that certificate
+  validity dates are unchecked until the device has a clock.
+- `spin` is depended on directly only to enable its `portable_atomic` feature:
+  riscv32imc has no atomic compare-exchange, and `rsa` reaches `spin` through
+  num-bigint-dig.
 
 ## Still to do
 
