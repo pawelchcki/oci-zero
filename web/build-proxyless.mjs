@@ -51,11 +51,14 @@ const appSource = [
     ),
 ].join("\n");
 
+// Replacement *functions*, not strings: a `$&` anywhere in the inlined sources
+// would otherwise be expanded into the matched text, splicing a stray tag into
+// the middle of the bundle.
 const bundled = html
-  .replace(/\s*<link rel="stylesheet" href="style\.css">/, `\n    <style>\n${css}\n    </style>`)
+  .replace(/\s*<link rel="stylesheet" href="style\.css">/, () => `\n    <style>\n${css}\n    </style>`)
   .replace(
     /\s*<script type="module" src="app\.js"><\/script>/,
-    `\n    <script type="module">\n${appSource.replaceAll("</script", "<\\/script")}\n    </script>`,
+    () => `\n    <script type="module">\n${appSource.replaceAll("</script", "<\\/script")}\n    </script>`,
   );
 const output = join(root, "dist/proxyless.html");
 await mkdir(dirname(output), { recursive: true });

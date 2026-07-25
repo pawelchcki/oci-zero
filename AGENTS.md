@@ -79,3 +79,9 @@ Do not run `cargo publish` by hand; let the pipeline do it.
 - `gzip-zero` — no-std streaming gzip decoder (published)
 - `zstd-zero` — no-std streaming Zstandard decoder (published)
 - `oci-zero-no-std-extract`, `oci-zero-web` — examples/tools, `publish = false`
+
+`tools/` and `web/` are not crates, but they sit inside the root package's
+directory, so release-plz counts changes there as changes to `oci-zero`. The
+`release_commits` filter in `.release-plz.toml` is what stops a `ci:`, `build:` or
+`chore:` commit touching them from publishing a new `oci-zero`; use those types
+for changes that are not user-visible library changes.

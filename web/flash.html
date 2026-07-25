@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OCI Zero Flasher</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">OCI ZERO</p>
+        <h1>ESP32 firmware flasher</h1>
+      </div>
+      <span id="runtime-badge" class="badge hidden">loading</span>
+    </header>
+
+    <main class="explorer">
+      <aside class="navigation">
+        <section>
+          <h2>Open a firmware artifact</h2>
+          <p class="muted">
+            An OCI layout tar, as attached to the
+            <a href="https://github.com/pawelchcki/oci-zero/releases/tag/firmware-latest">rolling firmware release</a>.
+            Nothing is uploaded and nothing is fetched: the archive is walked in
+            this tab by the same <code>oci-zero</code> build the registry browser
+            uses.
+          </p>
+          <form id="artifact-form">
+            <label for="artifact-input">firmware-&lt;version&gt;.oci.tar</label>
+            <input id="artifact-input" type="file" accept=".tar,application/x-tar">
+          </form>
+          <p class="muted">
+            Or produce one yourself:<br>
+            <code>crane pull --format=oci ghcr.io/pawelchcki/oci-zero-firmware:latest layout</code><br>
+            <code>tar -cf firmware.oci.tar -C layout .</code>
+          </p>
+        </section>
+
+        <section id="device-panel" class="nav-panel">
+          <h2>Device</h2>
+          <p id="serial-support" class="muted"></p>
+          <div class="scan-actions">
+            <button id="flash" type="button" disabled>Flash over Web Serial</button>
+            <button id="read-version" class="secondary" type="button">Read installed version</button>
+          </div>
+          <p id="installed-version" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <label for="progress">Flash progress</label>
+          <progress id="progress" max="100" value="0"></progress>
+        </section>
+      </aside>
+
+      <div class="workspace">
+        <section id="artifact-panel" class="panel hidden">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" id="artifact-name"></p>
+              <h2>Artifact</h2>
+            </div>
+            <span id="artifact-chip" class="badge"></span>
+          </div>
+
+          <div id="descriptors">
+            <div class="descriptor">
+              <code>version</code>
+              <code id="artifact-version"></code>
+              <span class="muted">annotation</span>
+            </div>
+            <div class="descriptor">
+              <code>revision</code>
+              <code id="artifact-revision"></code>
+              <span class="muted">annotation</span>
+            </div>
+            <div class="descriptor">
+              <code>manifest</code>
+              <code id="manifest-digest"></code>
+              <span class="muted">verified</span>
+            </div>
+            <div class="descriptor">
+              <code>config</code>
+              <code id="config-digest"></code>
+              <span class="muted">verified</span>
+            </div>
+            <div class="descriptor">
+              <code>layer</code>
+              <code id="layer-digest"></code>
+              <span class="muted">verified</span>
+            </div>
+          </div>
+
+          <table id="entry-results" class="file-list">
+            <caption>Images to flash</caption>
+            <thead>
+              <tr>
+                <th scope="col">Path</th>
+                <th scope="col">Offset</th>
+                <th scope="col">Size</th>
+                <th scope="col">Digest</th>
+              </tr>
+            </thead>
+            <tbody id="entry-results-body"></tbody>
+          </table>
+
+          <!-- Where trust starts is a property worth stating plainly rather than
+               implying with a row of green ticks. -->
+          <div id="trust-note" class="notice">
+            <span>
+              <strong>What is verified.</strong>
+              <code id="outer-digest"></code> is the SHA-256 of the file you
+              picked, computed here — it proves nothing on its own, and neither
+              does <code>index.json</code>, the root of the archive. Everything
+              below it is verified: the manifest against the descriptor in
+              <code>index.json</code>, and the config and layer against the
+              descriptors in the manifest, with the layer hashed by
+              <code>oci-zero</code> as it inflates. Compare the
+              manifest digest above against
+              <code>crane digest ghcr.io/pawelchcki/oci-zero-firmware:latest</code>
+              to tie the archive back to the registry.
+            </span>
+          </div>
+
+          <details>
+            <summary>Raw manifest JSON</summary>
+            <pre id="manifest-json"></pre>
+          </details>
+          <details>
+            <summary>Raw flash config JSON</summary>
+            <pre id="config-json"></pre>
+          </details>
+        </section>
+      </div>
+
+      <section class="activity" aria-label="Activity">
+        <div class="activity-bar">
+          <p class="eyebrow">Activity</p>
+          <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
+          <button id="log-clear" class="secondary" type="button" aria-label="Clear activity log">Clear log</button>
+        </div>
+        <details id="log-drawer" class="log-drawer">
+          <summary>Activity log</summary>
+          <ol id="log-entries" class="log-entries" role="log" aria-live="off" aria-label="Activity log history"></ol>
+        </details>
+      </section>
+    </main>
+
+    <script type="module" src="flash.js"></script>
+  </body>
+</html>

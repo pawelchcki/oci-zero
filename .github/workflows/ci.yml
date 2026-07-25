@@ -38,11 +38,16 @@ jobs:
           cargo check -p oci-zero-web --target wasm32-unknown-unknown
           node --check web/app.js
           node --check web/background.js
+          node --check web/build-flash.mjs
+          node --check web/flash.js
           node --check web/playwright.config.mjs
           node --check web/scan-worker.js
           node --check web/tests/browser.spec.mjs
+          node --check web/tests/firmware-fixture.mjs
+          node --check web/tests/flash.spec.mjs
           node --check web/tests/server.mjs
           python3 -m json.tool web/manifest.json > /dev/null
+          sh -n tools/build-firmware-artifact.sh
       - name: Public OCI artifact metadata smoke tests
         run: cargo test --release --test metadata_smoke inspects_public_registry_fixtures -- --ignored --nocapture
       - name: no_std MbedTLS streamed extraction smoke test
@@ -88,6 +93,59 @@ jobs:
       - name: Advisories in dev-dependencies (informational)
         continue-on-error: true
         run: cargo deny --config deny-dev.toml check advisories
+
+  # Runs the real pages against the real WASM: the registry browser against the
+  # local fixture registry, and the flasher against layout tars — including one
+  # built by tools/build-firmware-artifact.sh, so the script and the test fixture
+  # cannot drift apart unnoticed. No hardware is involved; esptool-js is
+  # substituted inside the page.
+  browser:
+    name: Browser end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: Build WebAssembly package
+        run: web/build.sh
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Build a firmware layout tar with the real script
+        run: |
+          set -eu
+          # A stand-in for an espflash image: enough of an esp_app_desc_t for the
+          # page's version readback, which is all the layout builder cares about.
+          python3 - <<'PY'
+          import struct
+          image = bytearray(8192)
+          image[0:2] = b"\xe9\x01"
+          struct.pack_into("<I", image, 0x20, 0xABCD5432)
+          image[0x30:0x30 + len("0.0.0-ci")] = b"0.0.0-ci"
+          open("firmware.bin", "wb").write(image)
+          PY
+          ./tools/build-firmware-artifact.sh \
+            --image firmware.bin:0x10000 \
+            --version 0.0.0-ci \
+            --revision "$GITHUB_SHA" \
+            --output /tmp/ci-layout
+          tar -cf /tmp/ci-firmware.oci.tar -C /tmp/ci-layout .
+      - run: npm run test:e2e
+        working-directory: web
+        env:
+          OCI_ZERO_FIRMWARE_TAR: /tmp/ci-firmware.oci.tar
+          OCI_ZERO_FIRMWARE_VERSION: 0.0.0-ci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7
 
   msrv:
     name: Rust 1.75 / no_std

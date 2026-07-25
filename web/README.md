@@ -88,6 +88,61 @@ Streaming scans do not have a whole-layer blob limit. Whole-image exports and
 extracted files remain limited to 256 MiB in this example. Layer indexes are
 limited to 200,000 entries and Zstandard windows to 256 MiB.
 
+## Firmware flasher
+
+`flash.html` is a second, separate page: it takes an OCI **layout tar** holding an
+ESP32 firmware artifact, verifies it, and writes it to a board over Web Serial.
+It reuses this directory's `pkg/` WebAssembly module and `style.css` and adds
+[`esptool-js`](https://github.com/espressif/esptool-js) as its only new
+dependency.
+
+It takes a local file rather than a registry URL on purpose. GHCR sends no CORS
+headers and answers preflight with 405, so a plain HTTPS page cannot talk to it
+at all; taking a file needs no proxy, no `/v2/` mirror, and no relaxed Chrome
+profile. Get one with:
+
+```console
+crane pull --format=oci ghcr.io/pawelchcki/oci-zero-firmware:latest layout
+tar -cf firmware.oci.tar -C layout .
+```
+
+or download `firmware-<version>.oci.tar` from the rolling `firmware-latest`
+release, which `.github/workflows/firmware.yml` publishes alongside the registry
+push from the same layout directory.
+
+**What the page verifies.** The SHA-256 it shows for the file you picked is its
+own hash of that file, and `index.json` — the root of the archive — is not
+verified by anything. Everything under it is: the manifest against the descriptor
+in `index.json`, the config against the descriptor in the manifest, and the layer
+by `oci-zero`'s `VerifiedDecoder` in compressed-only mode, which hashes the
+compressed stream while inflating it and rejects a wrong digest or length. To tie
+the archive back to the registry, compare the manifest digest the page displays
+against `crane digest ghcr.io/pawelchcki/oci-zero-firmware:latest`.
+
+The firmware config blob uses a vendor media type and therefore has no
+`rootfs.diff_ids`, which is why the page passes `diff_id: None` and takes the
+`VerifiedDecoder::compressed_only` path. The layer media type keeps a
+`.tar+gzip` suffix because `browser_encoding` in `src/lib.rs` dispatches on that
+suffix; a vendor media type that did not end that way would be undecodable here.
+
+Flashing needs Chrome, Edge or Opera on desktop — Firefox and Safari have no Web
+Serial API. The page writes each image in the config at its declared offset, so
+it has no ESP32-C3 offsets compiled into it, and refuses to flash when the chip
+the artifact declares is not the chip that answers. **Read installed version**
+reads the application partition and parses the `version` field of
+`esp_app_desc_t`, whose layout matches `esp-bootloader-esp-idf`'s `EspAppDesc`.
+
+Build the single-file version the same way as the registry browser:
+
+```console
+cd web
+npm ci
+npm run build:flash
+```
+
+The result is `web/dist/flash.html`, published at
+<https://pawelchcki.github.io/oci-zero/flash.html>.
+
 ## Browser tests
 
 The Playwright suite runs the real page, worker, and WebAssembly module against
@@ -96,6 +151,21 @@ browsing, virtualized large lists, progressive tag resolution, deep-search
 pagination and cancellation, 250-row file pagination, provisional-to-verified
 streamed listings, filtering, file download, and rollback after an integrity
 failure.
+
+`tests/flash.spec.mjs` covers the flasher against layout tars built by
+`tests/firmware-fixture.mjs`: the verified walk from `index.json` down to
+`firmware.bin`, rejection of a layer whose digest no longer matches its
+descriptor, rejection of a damaged compressed payload, both `./name` and `name`
+member spellings, and the version readback. It also runs against a tar produced
+by `tools/build-firmware-artifact.sh` when `OCI_ZERO_FIRMWARE_TAR` points at one,
+which is what keeps the script and the JS fixture from drifting apart; CI always
+sets it.
+
+No board is involved. `esptool-js` is substituted inside the page through a
+single documented seam, so the tests assert which images the page writes at which
+offsets, and that the serial port is released even when flashing is refused —
+but they do not exercise the ROM bootloader protocol, which is esptool-js's own
+concern.
 
 Build the WebAssembly package, install the test dependency, and run the suite:
 
@@ -135,8 +205,12 @@ the CORS-disabled Chrome profile shown above.
 
 The current build is published at <https://pawelchcki.github.io/oci-zero/>.
 
-The `.github/workflows/pages.yml` workflow builds the WebAssembly package and the
-self-contained page, then publishes it to GitHub Pages on every push to `main`
+The flasher is at <https://pawelchcki.github.io/oci-zero/flash.html>. Unlike the
+registry browser it needs no CORS relaxation, because it reads a local file
+instead of fetching from a registry.
+
+The `.github/workflows/pages.yml` workflow builds the WebAssembly package and both
+self-contained pages, then publishes them to GitHub Pages on every push to `main`
 that touches `web/` or the workflow itself (and on manual dispatch). It runs
 after Pages is enabled for the repository with **Build and deployment → Source:
 GitHub Actions**.

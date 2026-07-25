@@ -1,0 +1,7 @@
+# Pinned so the measurement in MEASUREMENTS.md is reproducible: esp-hal and
+# rs-matter-embassy both track recent nightly-adjacent stable features, and code
+# size moves noticeably between toolchains.
+[toolchain]
+channel = "1.95.0"
+components = ["rust-src", "llvm-tools"]
+targets = ["riscv32imc-unknown-none-elf"]

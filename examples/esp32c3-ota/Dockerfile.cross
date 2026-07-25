@@ -1,0 +1,40 @@
+# Build image for cross-rs, for riscv32imc-unknown-none-elf.
+#
+# cross has no bare-metal riscv32 image of its own, and the only thing this
+# target actually needs beyond the Rust toolchain — which cross supplies — is a C
+# toolchain that can target RISC-V, for mbedTLS's C sources. A Linux clang has
+# every LLVM backend compiled in, so `clang` plus `cmake` is the whole story; no
+# Espressif GCC toolchain is required.
+FROM ubuntu:24.04
+
+# `cross` bases its own images on ubuntu and expects this layout, so keep the
+# install minimal and let cross mount the toolchain.
+RUN apt-get update && apt-get install --assume-yes --no-install-recommends \
+        ca-certificates \
+        clang \
+        cmake \
+        curl \
+        git \
+        libclang-dev \
+        llvm-dev \
+        make \
+        pkg-config \
+        python3 \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# mbedtls-rs-sys drives cmake and picks clang unless CLANG_PATH says otherwise;
+# bindgen needs libclang. Naming them explicitly beats relying on PATH order.
+#
+# CC_* is for the `cc` crate, which tinyrlibc uses and which would otherwise look
+# for `riscv32-unknown-elf-gcc` and fail with status 127. Unlike a GCC
+# cross-toolchain, one clang covers every target, which is the whole reason this
+# image exists.
+ENV CLANG_PATH=/usr/bin/clang \
+    LIBCLANG_PATH=/usr/lib/llvm-18/lib \
+    CC_riscv32imc_unknown_none_elf=clang
+
+# Fail loudly at image build time rather than mid-compile if the backend the
+# whole image exists for is somehow absent.
+RUN clang --print-targets | grep -q riscv32 \
+    || (echo "this clang has no RISC-V backend" >&2 && exit 1)

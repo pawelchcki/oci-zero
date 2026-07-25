@@ -1,0 +1,31 @@
+# Builds this crate inside a container via cross-rs.
+#
+# Why: mbedTLS is compiled from source for riscv32imc by the esp-rs mbedtls-rs
+# fork, which needs a C compiler with a RISC-V backend. Apple's /usr/bin/clang
+# has none, so a macOS host cannot build this crate directly — it fails with
+# "No available targets are compatible with triple riscv32-...". A Linux clang
+# has every backend enabled, so building in a container removes the whole problem
+# and makes the local build identical to CI's.
+#
+# cross ships no image for a bare-metal riscv32 target, so this one is built from
+# Dockerfile.cross.
+[target.riscv32imc-unknown-none-elf]
+dockerfile = "./Dockerfile.cross"
+
+[build.env]
+# Passed into the container. ESP_LOG is read by esp-println's logger at build
+# time; the rest keep cargo's output where the host expects it.
+passthrough = [
+    "ESP_LOG",
+    "CARGO_TERM_COLOR",
+]
+
+# `oci-zero` is a path dependency two directories up, outside the crate cross
+# mounts. cross only mounts it on its own when it is an *active* dependency, so a
+# build with the feature disabled fails with "failed to read
+# ../../Cargo.toml" — cargo reads the manifest of an optional path dependency
+# whether or not the feature is on. Mounting it unconditionally fixes every
+# feature combination.
+#
+# measure.sh exports OCI_ZERO_ROOT; set it yourself for a bare `cross build`.
+volumes = ["OCI_ZERO_ROOT"]

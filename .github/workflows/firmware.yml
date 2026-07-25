@@ -1,0 +1,163 @@
+name: Firmware artifact
+
+on:
+  # Only on main. A per-PR push would fill GHCR with an artifact per commit of
+  # every branch, and the flasher page only ever offers versions that exist on
+  # main. Fork PRs could not push anyway: their token is read-only.
+  push:
+    branches: [main]
+    paths:
+      - examples/esp32c3-ota/**
+      - tools/build-firmware-artifact.sh
+      - .github/workflows/firmware.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled run can leave `latest` pointing at an older artifact
+# than `sha-*`.
+concurrency:
+  group: firmware
+  cancel-in-progress: false
+
+env:
+  CHIP: esp32c3
+  TARGET: riscv32imc-unknown-none-elf
+  IMAGE: ghcr.io/pawelchcki/oci-zero-firmware
+  # Both tools are pinned by version *and* checksum: they decide the bytes that
+  # end up flashed onto a device, so a changed upstream asset must fail loudly
+  # rather than silently ship.
+  ESPFLASH_VERSION: "4.5.0"
+  ESPFLASH_SHA256: "dcd7fd822f247df18966935bbb10c7cb4b700c87172349633e9e323ee2542717"
+  CRANE_VERSION: "0.21.7"
+  CRANE_SHA256: "1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230"
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the layout tar to the rolling firmware release
+      packages: write # push the OCI artifact to GHCR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned to the version examples/esp32c3-ota/rust-toolchain.toml names, so
+      # CI and a local build produce the same code size.
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: "1.95.0"
+          targets: ${{ env.TARGET }}
+
+      # mbedTLS is compiled from source for riscv32. A Linux clang has every LLVM
+      # backend, so no Espressif GCC toolchain is needed and `cross` is
+      # unnecessary here — unlike on macOS, where the system clang has no RISC-V
+      # backend. See examples/esp32c3-ota/MEASUREMENTS.md.
+      - name: Install a C toolchain for riscv32
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install --assume-yes --no-install-recommends clang cmake libclang-dev
+          clang --print-targets | grep -q riscv32
+
+      - name: Install espflash and crane
+        run: |
+          set -eu
+          curl -fsSLo /tmp/espflash.zip \
+            "https://github.com/esp-rs/espflash/releases/download/v${ESPFLASH_VERSION}/espflash-x86_64-unknown-linux-gnu.zip"
+          echo "${ESPFLASH_SHA256}  /tmp/espflash.zip" | sha256sum --check
+          unzip -j -o /tmp/espflash.zip espflash -d /tmp
+          sudo install -m 0755 /tmp/espflash /usr/local/bin/espflash
+          espflash --version
+
+          curl -fsSLo /tmp/crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum --check
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          sudo install -m 0755 /tmp/crane /usr/local/bin/crane
+          crane version
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -eu
+          crate=$(cargo metadata --manifest-path examples/esp32c3-ota/Cargo.toml \
+            --no-deps --format-version 1 | jq -r '.packages[0].version')
+          short=$(git rev-parse --short=7 HEAD)
+          echo "version=${crate}+sha.${short}" >> "$GITHUB_OUTPUT"
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+
+      - name: Build firmware
+        working-directory: examples/esp32c3-ota
+        env:
+          CLANG_PATH: /usr/bin/clang
+          CC_riscv32imc_unknown_none_elf: clang
+        run: cargo build --release --target "$TARGET" --features full
+
+      - name: Save flashable image
+        run: |
+          set -eu
+          espflash save-image --chip "$CHIP" \
+            "examples/esp32c3-ota/target/${TARGET}/release/oci-zero-esp32c3-ota" \
+            firmware.bin
+          ls -l firmware.bin
+
+      - name: Assemble OCI layout
+        id: layout
+        run: |
+          set -eu
+          ./tools/build-firmware-artifact.sh \
+            --image firmware.bin:0x10000 \
+            --version '${{ steps.version.outputs.version }}' \
+            --revision "$GITHUB_SHA" \
+            --chip "$CHIP" \
+            --target "$TARGET" \
+            --output layout \
+            --summary layout.env
+          # Appended, never redirected: $GITHUB_OUTPUT is shared by every step in
+          # the job, so `>` would discard the outputs written above.
+          cat layout.env >> "$GITHUB_OUTPUT"
+
+      - name: Push the OCI artifact to GHCR
+        run: |
+          set -eu
+          crane auth login ghcr.io -u '${{ github.actor }}' \
+            --password-stdin <<< '${{ secrets.GITHUB_TOKEN }}'
+          crane push layout "${IMAGE}:sha-${{ steps.version.outputs.short }}"
+          crane push layout "${IMAGE}:latest"
+
+      # The whole point of the artifact is that the registry and the release
+      # asset are the same bytes. Assert it rather than trust it.
+      - name: Verify the registry digest matches the local layout
+        run: |
+          set -eu
+          remote=$(crane digest "${IMAGE}:sha-${{ steps.version.outputs.short }}")
+          expected='${{ steps.layout.outputs.manifest_digest }}'
+          echo "remote:   $remote"
+          echo "expected: $expected"
+          test "$remote" = "$expected"
+
+      - name: Pack the release tar
+        id: tar
+        run: |
+          set -eu
+          name="firmware-${{ steps.version.outputs.version }}.oci.tar"
+          tar -cf "$name" -C layout .
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          sha256sum "$name"
+
+      # A single rolling pre-release, deliberately not a semver tag: release-plz
+      # owns `v*` tags and the releases attached to them, and cutting a release
+      # per push here would collide with that.
+      - name: Publish to the rolling firmware release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if ! gh release view firmware-latest >/dev/null 2>&1; then
+            gh release create firmware-latest --prerelease \
+              --title "ESP32-C3 firmware (rolling)" \
+              --notes "OCI layout tars built from main. Flash them from the browser: https://pawelchcki.github.io/oci-zero/flash.html"
+          fi
+          gh release upload firmware-latest "${{ steps.tar.outputs.name }}" --clobber

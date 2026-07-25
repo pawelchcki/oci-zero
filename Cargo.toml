@@ -9,9 +9,16 @@ repository = "https://github.com/pawelchcki/oci-zero"
 readme = "README.md"
 keywords = ["oci", "containers", "registry", "no-std", "streaming"]
 categories = ["no-std", "network-programming", "parser-implementations"]
+# The ESP32-C3 firmware is a separate workspace with its own target, toolchain
+# and `[patch.crates-io]` pins. Excluding it from the *package* as well keeps it
+# out of the published `oci-zero` .crate.
+exclude = ["examples/esp32c3-ota"]
 
 [workspace]
 members = ["gzip-zero", "no-std-extract", "web", "zstd-zero"]
+# Not a member: it targets riscv32imc-unknown-none-elf and patches esp-hal to a
+# git revision, neither of which may leak into the hosted crates.
+exclude = ["examples/esp32c3-ota"]
 resolver = "2"
 
 [profile.dev]

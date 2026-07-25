@@ -1,0 +1,11 @@
+[build]
+target = "riscv32imc-unknown-none-elf"
+
+[target.riscv32imc-unknown-none-elf]
+# `espflash flash --monitor` makes `cargo run` flash the attached board.
+runner = "espflash flash --monitor"
+# esp-hal's linker scripts place the app descriptor, flash segments and RAM.
+rustflags = ["-C", "link-arg=-Tlinkall.x"]
+
+[env]
+ESP_LOG = "info"

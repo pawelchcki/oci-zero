@@ -4,12 +4,14 @@
   "type": "module",
   "scripts": {
     "build:proxyless": "node build-proxyless.mjs",
-    "pretest:e2e": "npm run build:proxyless",
+    "build:flash": "node build-flash.mjs",
+    "pretest:e2e": "npm run build:proxyless && npm run build:flash",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
-    "@playwright/test": "1.61.1"
+    "@playwright/test": "1.61.1",
+    "esptool-js": "0.6.0"
   }
 }
