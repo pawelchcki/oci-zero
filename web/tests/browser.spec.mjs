@@ -138,9 +138,37 @@ test("keeps populated results usable within laptop and phone viewports", async (
     await page.locator("#scan-files").click();
     await expect(page.locator("#status")).toHaveText("Scanned 1 layer.", { timeout: 10_000 });
 
-    const horizontalOverflow = await page.evaluate(() =>
-      document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    expect(horizontalOverflow).toBe(0);
+    // Reports which elements stick out, not just that something does: a bare
+    // "expected 0, received 10" is unactionable, and this assertion only ever
+    // fails on a machine other than the one you are sitting at.
+    const overflow = await page.evaluate(() => {
+      const limit = document.documentElement.clientWidth;
+      const past = (element) => element.getBoundingClientRect().right > limit + 0.5;
+      const offenders = [...document.querySelectorAll("*")]
+        .filter(past)
+        // Innermost first: an overflowing child drags every ancestor over the
+        // line too, and the child is the one to fix.
+        .filter((element) => ![...element.children].some(past))
+        .map((element) => {
+          const id = element.id ? `#${element.id}` : "";
+          const classes = typeof element.className === "string" && element.className.trim()
+            ? `.${element.className.trim().split(/\s+/).join(".")}`
+            : "";
+          const { right, width } = element.getBoundingClientRect();
+          return `${element.tagName.toLowerCase()}${id}${classes} right=${Math.round(right)} width=${Math.round(width)}`;
+        });
+      return {
+        pixels: document.documentElement.scrollWidth - limit,
+        limit,
+        offenders: offenders.slice(0, 8),
+      };
+    });
+    expect(
+      overflow.pixels,
+      `${viewport.width}px viewport overflows by ${overflow.pixels}px `
+        + `(client width ${overflow.limit}); innermost offenders: `
+        + `${overflow.offenders.join(" | ") || "none identified"}`,
+    ).toBe(0);
     const download = page.getByRole("button", { name: "Download etc/hello.txt" });
     await download.scrollIntoViewIfNeeded();
     await expect(download).toBeInViewport();
