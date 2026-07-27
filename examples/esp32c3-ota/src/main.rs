@@ -28,6 +28,13 @@ extern crate alloc;
 #[cfg(feature = "matter")]
 use tinyrlibc as _;
 
+// At module scope because the `NODE` const below needs the `CLUSTER` associated
+// items these traits provide.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+use rs_matter_embassy::matter::dm::clusters::app::on_off::OnOffHooks as _;
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+use rs_matter_embassy::matter::dm::clusters::desc::ClusterHandler as _;
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// Memory for the futures `rs-matter-stack` creates inside its `run*` methods,
@@ -127,7 +134,7 @@ const FIRMWARE_VERSION: &str = match option_env!("OCI_ZERO_FIRMWARE_VERSION") {
 /// this canned one to mbedTLS + reqwless. Running it here is what puts the
 /// manifest parser, the digest verifier and the gzip decoder in the image, and
 /// what makes the `PullBuffers` sizes below a real RAM cost rather than a guess.
-#[cfg(feature = "oci")]
+#[cfg(all(feature = "oci", feature = "measure"))]
 async fn reference_oci_zero() {
     use oci_zero::{
         digest::Digest,
@@ -253,13 +260,13 @@ async fn reference_oci_zero() {
 /// are wrong on purpose: `pull()` verifies them, so the walk fails at the blob
 /// stage — after the parser, the descriptor handling and the digest code have
 /// all been linked in, which is the only thing being measured.
-#[cfg(feature = "oci")]
+#[cfg(all(feature = "oci", feature = "measure"))]
 const MANIFEST: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.oci-zero.firmware.v1+json","config":{"mediaType":"application/vnd.oci-zero.firmware.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":108},"layers":[{"mediaType":"application/vnd.oci-zero.firmware.layer.v1.tar+gzip","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":1024}],"annotations":{"org.opencontainers.image.version":"0.0.0-measure","vnd.oci-zero.firmware.chip":"esp32c3"}}"#;
 
-#[cfg(feature = "oci")]
+#[cfg(all(feature = "oci", feature = "measure"))]
 const CONFIG: [u8; 108] = *br#"{"chip":"esp32c3","target":"riscv32imc-unknown-none-elf","entries":[{"path":"firmware.bin","offset":65536}]}"#;
 
-#[cfg(feature = "oci")]
+#[cfg(all(feature = "oci", feature = "measure"))]
 const LAYER: [u8; 1024] = [0; 1024];
 
 /// Drives a real `embedded-tls` handshake, with certificate verification, over a
@@ -276,7 +283,7 @@ const LAYER: [u8; 1024] = [0; 1024];
 /// `embedded-tls` is pure Rust, so `cargo build` works on any host. `oci-zero`
 /// needs no change either: its reqwless adapter takes any `Read + Write`, so a
 /// `TlsConnection` plugs straight in.
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "tls", feature = "measure"))]
 async fn reference_tls() {
     use embedded_io_async::{ErrorType, Read, Write};
     use embedded_tls::pki::CertVerifier;
@@ -392,14 +399,14 @@ async fn reference_tls() {
 /// code paths are measured, but it is not a usable CA: Chunk 6 has to pin the
 /// actual root for `ghcr.io` and the blob-redirect host, and supply a real clock
 /// so validity dates are checked at all — `NoClock` skips them.
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "tls", feature = "measure"))]
 const CA_CERTIFICATE: &[u8] = &[0; 1200];
 
 /// Constructs the Wifi and BLE controllers, which is what pulls esp-radio's
 /// driver code and PHY blobs into the image. Both are needed at once: BLE
 /// carries commissioning and Wifi carries the OCI pull, and their coexistence is
 /// the expensive case.
-#[cfg(feature = "radio")]
+#[cfg(all(feature = "radio", feature = "measure"))]
 fn reference_radio(
     wifi: esp_hal::peripherals::WIFI<'static>,
     bt: esp_hal::peripherals::BT<'static>,
@@ -423,7 +430,7 @@ fn reference_radio(
 
 /// Allocates the Matter stack exactly as `rs-matter-embassy`'s own example does,
 /// so the measurement covers its real static footprint rather than a stub's.
-#[cfg(feature = "matter")]
+#[cfg(all(feature = "matter", feature = "measure"))]
 fn reference_matter() {
     use rs_matter_embassy::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
     use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
@@ -470,7 +477,11 @@ async fn run_device(
     use esp_hal::gpio::{Input, InputConfig, Pull};
     use esp_storage::FlashStorage;
     use rs_matter_embassy::matter::crypto::{default_crypto, Crypto};
+    use rs_matter_embassy::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
+    use rs_matter_embassy::matter::dm::clusters::app::on_off::{self, OnOffHooks};
+    use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
     use rs_matter_embassy::matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM};
+    use rs_matter_embassy::matter::dm::{Async, Dataver, EmptyHandler, EpClMatcher};
     use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
     use rs_matter_embassy::matter::utils::select::Coalesce;
     use rs_matter_embassy::persist::SeqMapKvBlobStore;
@@ -530,6 +541,30 @@ async fn run_device(
         info!("  scan the QR code in README.md, or pair with code 34970112332");
     }
 
+    // The handler chain for endpoint 1. `Dataver` needs randomness, which is why
+    // this comes after the crypto provider.
+    let mut dataver_rand = crypto.weak_rand().expect("a weak RNG");
+    let on_off = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(&mut dataver_rand),
+        UPDATER_ENDPOINT_ID,
+        TestOnOffDeviceLogic::new(false),
+    );
+    let handler = EmptyHandler
+        .chain(
+            EpClMatcher::new(
+                Some(UPDATER_ENDPOINT_ID),
+                Some(TestOnOffDeviceLogic::CLUSTER.id),
+            ),
+            on_off::HandlerAsyncAdaptor(&on_off),
+        )
+        .chain(
+            EpClMatcher::new(
+                Some(UPDATER_ENDPOINT_ID),
+                Some(desc::DescHandler::CLUSTER.id),
+            ),
+            Async(desc::DescHandler::new(Dataver::new_rand(&mut dataver_rand)).adapt()),
+        );
+
     {
         // `pin!` is optional but shrinks the resulting future noticeably.
         let mut matter = pin!(stack.run_coex(
@@ -540,7 +575,7 @@ async fn run_device(
                 stack,
             ),
             &crypto,
-            (NODE, rs_matter_embassy::matter::dm::EmptyHandler),
+            (NODE, handler),
             &kv,
             (),
         ));
@@ -623,16 +658,37 @@ const DEV_DET: rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoCon
     }
 };
 
-/// The Matter node: the root endpoint and nothing else.
+/// The endpoint the commissioner actually sees.
 ///
-/// No on-off cluster and no fictitious light. This device's whole function is to
-/// update itself, which Matter models nowhere, so inventing a device type would
-/// only be noise. The root endpoint alone still carries Basic Information,
-/// Network Commissioning and the rest of the system clusters a commissioner needs.
+/// Endpoint 0 is the root, which carries Basic Information, Network Commissioning
+/// and the rest of the system clusters. It is not enough on its own: a node whose
+/// only endpoint is the root exposes no *device type*, and ecosystems will not
+/// show a node they cannot put in a category — Google Home simply ignores it. The
+/// first version of this firmware made that mistake.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+const UPDATER_ENDPOINT_ID: u16 = 1;
+
+/// The Matter node.
+///
+/// The On/Off type is a stand-in, and knowingly so: Matter models no "thing that
+/// updates itself", and picking a type that every ecosystem recognises is worth
+/// more here than inventing an accurate one nothing can display. The switch state
+/// carries no meaning — the point of the endpoint is to make the node visible so
+/// it can be commissioned.
 #[cfg(all(feature = "matter", not(feature = "measure")))]
 const NODE: rs_matter_embassy::matter::dm::Node = rs_matter_embassy::matter::dm::Node {
     endpoints: &[
         rs_matter_embassy::wireless::EmbassyWifiMatterStack::<0, ()>::root_endpoint(),
+        rs_matter_embassy::matter::dm::Endpoint::new(
+            UPDATER_ENDPOINT_ID,
+            rs_matter_embassy::matter::devices!(
+                rs_matter_embassy::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT
+            ),
+            rs_matter_embassy::matter::clusters!(
+                rs_matter_embassy::matter::dm::clusters::desc::DescHandler::CLUSTER,
+                rs_matter_embassy::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic::CLUSTER
+            ),
+        ),
     ],
 };
 

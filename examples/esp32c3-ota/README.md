@@ -58,8 +58,18 @@ this file cannot describe a device other than the one that gets built.
   acceptable for a demo and not for a product.
 - **This is not a certified Matter device.** It uses rs-matter's test
   attestation certificates (`TEST_DEV_ATT`) and the test vendor ID `0xFFF1`.
-  `chip-tool` and Google Home accept an uncertified DAC; Apple Home generally
-  refuses one. Do not expect every ecosystem to pair with it.
+  Apple Home generally refuses an uncertified DAC outright.
+
+  **Google Home needs setting up before it will show this device at all.** A test
+  vendor ID is not enough on its own: the VID/PID pair has to be registered as a
+  Matter integration in the [Google Home Developer
+  Console](https://console.home.google.com/), and the Google account doing the
+  commissioning has to be a member of that project. Without that, the Home app
+  will not offer the device even when it is advertising correctly — the failure
+  looks identical to the device being broken.
+
+  `chip-tool` has no such requirement and is the honest way to prove the device
+  works before blaming an ecosystem.
 
 ### If it does not advertise
 
