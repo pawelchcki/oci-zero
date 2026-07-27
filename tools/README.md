@@ -71,3 +71,21 @@ depending on whether GNU tar or bsdtar is installed. Requires `jq` and `python3`
 explicitly gives `index.json`. `oci-zero` matches the archive's own path, so
 `web/flash.js` tries both spellings. On macOS, set `COPYFILE_DISABLE=1` to keep
 bsdtar from adding AppleDouble `._*` members.
+
+## `split-flash-image.py`
+
+Cuts an `espflash save-image --merge` image back into `bootloader.bin`,
+`partition-table.bin` and `firmware.bin`, each with its flash offset, and prints
+an `IMAGE_ARGS=` line ready to pass to `build-firmware-artifact.sh`.
+
+This exists because neither of espflash's outputs suits an OCI artifact. The
+application alone cannot provision a board whose partition table puts the app
+somewhere else — which is how the first published artifact failed to boot, writing
+an app at `0x20000` onto a board whose default table expected one at `0x10000`,
+so nothing ran and the device never advertised. The merged image would work, but
+it is padded to the full 4 MB of flash and would spend the whole layer on
+erase-state bytes.
+
+Pass the *padded* merged image, not `--skip-padding`: the splitter treats file
+offsets as flash offsets, and skipping padding compacts the file so they no longer
+agree.

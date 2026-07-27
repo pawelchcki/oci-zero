@@ -61,6 +61,26 @@ this file cannot describe a device other than the one that gets built.
   `chip-tool` and Google Home accept an uncertified DAC; Apple Home generally
   refuses one. Do not expect every ecosystem to pair with it.
 
+### If it does not advertise
+
+The device only advertises while it is uncommissioned *and actually running*. If
+serial shows nothing at all, it is not running, and the usual reason is a
+partition table that disagrees with where the application was written: this
+firmware lives in `ota_0` at `0x20000`, while the stock single-factory table
+expects an app at `0x10000`. Flashing only the application onto such a board
+leaves the bootloader with nothing to boot.
+
+The published artifact therefore carries `bootloader.bin`, `partition-table.bin`
+and `firmware.bin`, so the browser flasher can provision a board from scratch. To
+do the same locally:
+
+```console
+cargo run --release --features full   # espflash writes all three
+```
+
+Then watch the log. It should say `oci-zero esp32c3-ota <version>` followed by
+either `advertising over BLE` or `already commissioned`.
+
 ### Commissioning with chip-tool
 
 ```console

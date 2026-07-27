@@ -89,22 +89,36 @@ jobs:
           OCI_ZERO_FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
         run: cargo build --release --target "$TARGET" --features full
 
-      - name: Save flashable image
+      # A merged image, then split back into its three pieces.
+      #
+      # Publishing only the application does not work: it cannot provision a board
+      # whose partition table expects the app somewhere else, which is precisely
+      # how the first published artifact failed to boot — an app written at 0x20000
+      # onto a board whose default table looked for one at 0x10000, so nothing ran
+      # and the device never advertised over BLE. Publishing the 4 MB merged blob
+      # instead would spend the whole layer on erase-state padding.
+      - name: Build the flashable images
         run: |
           set -eu
-          espflash save-image --chip "$CHIP" \
-            "examples/esp32c3-ota/target/${TARGET}/release/oci-zero-esp32c3-ota" \
-            firmware.bin
-          ls -l firmware.bin
+          elf="examples/esp32c3-ota/target/${TARGET}/release/oci-zero-esp32c3-ota"
+          # Padded, not --skip-padding: the splitter reads flash offsets as file
+          # offsets, and skipping padding compacts the file so they stop matching.
+          espflash save-image --chip "$CHIP" --merge \
+            --partition-table examples/esp32c3-ota/partitions.csv \
+            "$elf" merged.bin
+          python3 tools/split-flash-image.py merged.bin images \
+            | tee split.log
+          grep '^IMAGE_ARGS=' split.log >> "$GITHUB_ENV"
 
-      # The offset has to match ota_0 in examples/esp32c3-ota/partitions.csv, and
-      # the table itself ships alongside so a blank board can be provisioned.
       - name: Assemble OCI layout
         id: layout
         run: |
           set -eu
+          # $IMAGE_ARGS carries bootloader/partition-table/firmware and their
+          # offsets, straight from the image that was just built, so the offsets
+          # cannot drift from partitions.csv.
           ./tools/build-firmware-artifact.sh \
-            --image firmware.bin:0x20000 \
+            $IMAGE_ARGS \
             --version '${{ steps.version.outputs.version }}' \
             --revision "$GITHUB_SHA" \
             --chip "$CHIP" \
@@ -114,6 +128,23 @@ jobs:
           # Appended, never redirected: $GITHUB_OUTPUT is shared by every step in
           # the job, so `>` would discard the outputs written above.
           cat layout.env >> "$GITHUB_OUTPUT"
+
+      # Guards the failure this splitting exists to prevent: an artifact carrying
+      # only the application boots nothing on a board whose partition table
+      # disagrees, and the symptom is a device that never advertises.
+      # Guards the failure this splitting exists to prevent: an artifact carrying
+      # only the application boots nothing on a board whose partition table
+      # disagrees, and the symptom is a device that never advertises.
+      - name: The artifact can provision a blank board
+        run: |
+          set -eu
+          config='${{ steps.layout.outputs.config_digest }}'
+          entries=$(jq -r '.entries[].path' "layout/blobs/sha256/${config#sha256:}")
+          echo "$entries"
+          for required in bootloader.bin partition-table.bin firmware.bin; do
+            echo "$entries" | grep -qx "$required" \
+              || { echo "the artifact is missing $required" >&2; exit 1; }
+          done
 
       - name: Push the OCI artifact to GHCR
         run: |
