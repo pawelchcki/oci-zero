@@ -492,6 +492,7 @@ async fn run_device(
     use esp_hal::gpio::{Input, InputConfig, Pull};
     use esp_storage::FlashStorage;
     use rs_matter_embassy::matter::crypto::{default_crypto, Crypto};
+    use rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig;
     use rs_matter_embassy::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
     use rs_matter_embassy::matter::dm::clusters::app::on_off::{self, OnOffHooks};
     use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -507,8 +508,9 @@ async fn run_device(
     // Allocated statically: its footprint is 35-50 KB and putting that on the
     // program stack would blow it, and the wireless stack variation requires a
     // 'static stack anyway.
+    let details = mk_static!(BasicInfoConfig<'static>).write(device_details());
     let stack = mk_static!(EmbassyWifiMatterStack<BUMP_SIZE, ()>).init_with(
-        EmbassyWifiMatterStack::init(&DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT),
+        EmbassyWifiMatterStack::init(details, TEST_DEV_COMM, &TEST_DEV_ATT),
     );
 
     // A reseeding CSPRNG over the hardware TRNG. `default_crypto` also wants the
@@ -656,22 +658,67 @@ async fn wait_for_factory_reset(
 
 /// Basic Information for this device.
 ///
-/// Vendor ID, product ID and serial number are `rs-matter`'s test values, because
-/// the committed QR code is computed from exactly those — see
-/// tools/matter-qr. The software version is *not* fixed: it carries
-/// [`FIRMWARE_VERSION`], so a commissioner displays the version that came out of
-/// the OCI registry.
+/// Vendor ID, product ID, discriminator and passcode are `rs-matter`'s test
+/// values, because the committed QR code is computed from exactly those — see
+/// tools/matter-qr.
+///
+/// Two fields are *not* fixed. `sw_ver_str` carries [`FIRMWARE_VERSION`], so a
+/// commissioner displays the version that came out of the OCI registry. And the
+/// serial number and unique ID come from the chip's factory MAC, so two boards
+/// running this firmware are distinguishable — see [`chip_identity`].
 #[cfg(all(feature = "matter", not(feature = "measure")))]
-const DEV_DET: rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig = {
+fn device_details() -> rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig<'static>
+{
     use rs_matter_embassy::matter::dm::devices::test::TEST_DEV_DET;
 
     rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig {
         sw_ver_str: FIRMWARE_VERSION,
         product_name: "oci-zero OTA demo",
         device_name: "oci-zero",
+        unique_id: chip_unique_id(),
         ..TEST_DEV_DET
     }
-};
+}
+
+/// A unique ID for this particular chip: the hex of its factory MAC.
+///
+/// `rs-matter` leaves `unique_id` empty by default, so without this every board
+/// running this firmware would report the same empty string. Ecosystems key on it
+/// to tell nodes apart, and the spec says it should differ per device, so two of
+/// these on one fabric could collapse into a single entry.
+///
+/// `unique_id` is the right field to vary and `serial_no` is not, which is not
+/// obvious: `rs-matter` puts a non-empty `serial_no` into the QR payload's
+/// optional TLV (`pairing/qr.rs`), so varying *that* per board would lengthen the
+/// payload and give every board a different code — destroying the whole point of
+/// a QR committed to the README. `unique_id` never reaches the payload, so it is
+/// free. Verified on hardware: the device prints the committed payload byte for
+/// byte with this in place, and a seven-character-longer one without.
+///
+/// The MAC is public and already broadcast in every WiFi frame, so exposing it
+/// here reveals nothing that sniffing the air would not.
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+fn chip_unique_id() -> &'static str {
+    /// `MacAddress` is six bytes, so twelve hex digits.
+    const LEN: usize = 12;
+
+    static DIGITS: static_cell::StaticCell<[u8; LEN]> = static_cell::StaticCell::new();
+
+    let mac = esp_hal::efuse::base_mac_address();
+    let mut digits = [0u8; LEN];
+    for (index, byte) in mac.as_bytes().iter().enumerate() {
+        digits[index * 2] = HEX[usize::from(byte >> 4)];
+        digits[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+    }
+
+    // Written once and never freed, which is what makes the `'static` borrow the
+    // `BasicInfoConfig` needs sound.
+    let digits = DIGITS.init(digits);
+    core::str::from_utf8(digits).expect("hex digits are ASCII")
+}
+
+#[cfg(all(feature = "matter", not(feature = "measure")))]
+const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// The endpoint the commissioner actually sees.
 ///
