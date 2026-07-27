@@ -91,6 +91,14 @@ cargo run --release --features full   # espflash writes all three
 Then watch the log. It should say `oci-zero esp32c3-ota <version>` followed by
 either `advertising over BLE` or `already commissioned`.
 
+If the board was flashed from the browser page and serial shows *nothing at all*
+— no bootloader banner either — the chip is most likely still sitting in the ROM
+loader. Dropping RTS reboots a board whose USB-UART bridge wires RTS to the reset
+pin; over the chip's own USB-Serial-JTAG peripheral there is no such wire. The
+flash is then correct and readable, so "Read installed version" answers happily
+while the firmware never runs. The page now uses the USB-Serial-JTAG reset
+sequence on those ports; power-cycling the board also clears it.
+
 `already commissioned` on a board that was never commissioned means the `nvs`
 partition holds bytes from the board's *previous* partition layout that happen to
 parse as saved Matter state. A commissioned node does not advertise, so the

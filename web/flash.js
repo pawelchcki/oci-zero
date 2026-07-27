@@ -276,10 +276,37 @@ async function flashArtifact() {
     });
     setProgress(100);
     setStatus(`Flashed ${artifact.version}. Resetting the board.`);
-    await loader.after("hard_reset");
+    await resetIntoApplication(loader, transport);
   } finally {
     await release(transport);
   }
+}
+
+// Product ID of the ESP32's own USB-Serial-JTAG peripheral. A board reached
+// through it has no USB-UART bridge, so RTS is not wired to the reset pin.
+const USB_JTAG_SERIAL_PID = 0x1001;
+
+// The USB-Serial-JTAG reset sequence, in esptool-js's CustomReset notation:
+// D/R set DTR/RTS, W waits. Transcribed from esptool-js's own
+// `UsbJtagSerialReset`, which it uses to *enter* the bootloader but not to leave
+// it.
+const USB_JTAG_RESET_SEQUENCE = "R0|D0|W100|D1|R0|W100|R1|D0|R1|W100|R0|D0";
+
+// Leaves the bootloader and starts the application that was just written.
+//
+// `after("hard_reset")` only drops RTS, which reboots a board whose USB-UART
+// bridge wires RTS to EN. Reached over the chip's own USB-Serial-JTAG peripheral
+// there is no such wire, so that does nothing and the chip stays in the ROM
+// loader: the flash is correct and readable — "Read installed version" still
+// answers, because the bootloader is what answers — while the firmware never
+// runs. Silent, and indistinguishable from firmware that boots and fails.
+async function resetIntoApplication(loader, transport) {
+  if (transport.getPid?.() !== USB_JTAG_SERIAL_PID) {
+    await loader.after("hard_reset");
+    return;
+  }
+  appendLogEntry("Native USB port: resetting with the USB-Serial-JTAG sequence.", false);
+  await loader.after("custom_reset", undefined, USB_JTAG_RESET_SEQUENCE);
 }
 
 async function readInstalledVersion() {

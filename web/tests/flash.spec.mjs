@@ -125,6 +125,23 @@ test("writes every image at its declared offset and resets the board", async ({ 
   expect(written.disconnects).toBe(1);
 });
 
+// Dropping RTS reboots a board whose USB-UART bridge wires RTS to EN. Reached
+// over the chip's own USB-Serial-JTAG peripheral there is no such wire, so the
+// chip stays in the ROM loader with correct, readable flash that never runs.
+// That failure is invisible from the page, so it is pinned here.
+test("uses the USB-Serial-JTAG reset sequence on a native USB port", async ({ page }) => {
+  await page.evaluate(() => {
+    globalThis.ociZeroEsptoolPid = 0x1001;
+  });
+  await open(page, firmwareLayout({ version: VERSION }));
+  await page.locator("#flash").click();
+  await expect(page.locator("#status")).toHaveText(`Flashed ${VERSION}. Resetting the board.`);
+
+  const written = await page.evaluate(() => globalThis.ociZeroEsptoolCalls);
+  expect(written.after).toEqual(["custom_reset:R0|D0|W100|D1|R0|W100|R1|D0|R1|W100|R0|D0"]);
+  await expect(page.locator("#log-entries")).toContainText("USB-Serial-JTAG sequence");
+});
+
 test("keeps the flash when the erase checkbox is cleared", async ({ page }) => {
   const fixture = firmwareLayout({ version: VERSION });
   await open(page, fixture);
@@ -265,6 +282,12 @@ async function installFakeEsptool(page) {
         this.device = device;
       }
 
+      // The page reads this to tell a USB-UART bridge from the chip's own
+      // USB-Serial-JTAG peripheral, which need different reset sequences.
+      getPid() {
+        return globalThis.ociZeroEsptoolPid;
+      }
+
       async disconnect() {
         calls.disconnects += 1;
       }
@@ -305,8 +328,8 @@ async function installFakeEsptool(page) {
         return out;
       }
 
-      async after(mode) {
-        calls.after.push(mode);
+      async after(mode, usingUsbOtg, sequenceString) {
+        calls.after.push(sequenceString ? `${mode}:${sequenceString}` : mode);
       }
     }
 
