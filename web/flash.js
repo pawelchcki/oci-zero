@@ -248,6 +248,15 @@ async function flashArtifact() {
     warnOnChipMismatch(loader, artifact);
     const total = artifact.entries.reduce((sum, entry) => sum + entry.data.length, 0);
     setProgress(0);
+    // Erasing is the default, because the artifact replaces the partition table
+    // and the images cover only the regions the table names. Whatever the board's
+    // previous layout left at the *new* otadata and nvs offsets survives an
+    // unerased write and is then read as this firmware's own state: a stale
+    // otadata can select an empty OTA slot, and stale nvs can look like a saved
+    // Matter fabric, so the device believes it is commissioned and never
+    // advertises over BLE.
+    const eraseAll = $("erase-all")?.checked ?? true;
+    if (eraseAll) setStatus("Erasing the flash. This takes a few seconds.");
     await loader.writeFlash({
       fileArray: artifact.entries.map((entry) => ({ data: entry.data, address: entry.offset })),
       // `keep` everywhere: the images were produced by espflash for this chip,
@@ -256,7 +265,7 @@ async function flashArtifact() {
       flashMode: "keep",
       flashFreq: "keep",
       flashSize: "keep",
-      eraseAll: false,
+      eraseAll,
       compress: true,
       reportProgress: (fileIndex, written) => {
         const before = artifact.entries

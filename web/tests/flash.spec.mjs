@@ -118,8 +118,23 @@ test("writes every image at its declared offset and resets the board", async ({ 
   // mode, frequency and size.
   expect(written.writeFlash[0].flashMode).toBe("keep");
   expect(written.writeFlash[0].flashSize).toBe("keep");
+  // On by default: the artifact replaces the partition table, so anything the
+  // board's old layout left at the new otadata or nvs offsets has to go.
+  expect(written.writeFlash[0].eraseAll).toBe(true);
   expect(written.after).toEqual(["hard_reset"]);
   expect(written.disconnects).toBe(1);
+});
+
+test("keeps the flash when the erase checkbox is cleared", async ({ page }) => {
+  const fixture = firmwareLayout({ version: VERSION });
+  await open(page, fixture);
+
+  await page.locator("#erase-all").uncheck();
+  await page.locator("#flash").click();
+  await expect(page.locator("#status")).toHaveText(`Flashed ${VERSION}. Resetting the board.`);
+
+  const written = await page.evaluate(() => globalThis.ociZeroEsptoolCalls);
+  expect(written.writeFlash[0].eraseAll).toBe(false);
 });
 
 test("refuses to flash an artifact built for a different chip", async ({ page }) => {

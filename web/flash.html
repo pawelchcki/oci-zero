@@ -45,6 +45,20 @@
             <button id="read-version" class="secondary" type="button">Read installed version</button>
           </div>
           <p id="installed-version" class="muted" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p class="muted">
+            <label>
+              <input id="erase-all" type="checkbox" checked>
+              Erase the whole flash first
+            </label>
+          </p>
+          <p class="muted">
+            Leave this on unless you are keeping a commissioned device on its
+            fabric. The artifact writes a partition table, and anything the
+            board's previous table left behind at the new
+            <code>otadata</code> or <code>nvs</code> offsets is read as if this
+            firmware had written it — which can boot an empty slot, or convince
+            the firmware it is already commissioned so it never advertises.
+          </p>
           <label for="progress">Flash progress</label>
           <progress id="progress" max="100" value="0"></progress>
         </section>

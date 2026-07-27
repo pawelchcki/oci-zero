@@ -91,17 +91,33 @@ cargo run --release --features full   # espflash writes all three
 Then watch the log. It should say `oci-zero esp32c3-ota <version>` followed by
 either `advertising over BLE` or `already commissioned`.
 
+`already commissioned` on a board that was never commissioned means the `nvs`
+partition holds bytes from the board's *previous* partition layout that happen to
+parse as saved Matter state. A commissioned node does not advertise, so the
+symptom is a silent device. Erase the whole flash — which is what the browser
+flasher does by default, and what `espflash erase-flash` does locally — rather
+than writing the new table over the old contents.
+
+### Is it advertising? Ask, without a commissioner
+
+Any BLE scanner (nRF Connect, LightBlue) shows a Matter node as a connectable
+advertisement carrying **service UUID `0xFFF6`**, with the discriminator in its
+service data. Seeing it separates the two failure modes that look identical from
+inside a phone app: the device is silent, or the ecosystem is refusing to display
+a device that is there. Neither serial nor an account is needed.
+
 ### Commissioning with chip-tool
 
 ```console
 chip-tool pairing code-wifi 1 <ssid> <password> 34970112332
 ```
 
-The device advertises over BLE while uncommissioned, receives the WiFi
-credentials over that BLE transport, persists them to the `nvs` partition, and
-tears BLE down before doing any OCI work — `mk_static!` allocations are never
-reclaimed, but the heap Matter's transient allocations release is what the TLS
-session needs.
+`chip-tool` commissions on attestation alone, so it is the check to run first: if
+it pairs, the firmware is fine and any remaining problem is the ecosystem's.
+
+BLE and WiFi run concurrently (`run_coex`), so the node is reachable over IP as
+soon as it joins, without a reboot. The credentials are persisted to the `nvs`
+partition.
 
 To wipe the credentials and re-commission, hold the BOOT button (GPIO9) for three
 seconds.
