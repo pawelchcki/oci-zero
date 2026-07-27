@@ -35,7 +35,22 @@ use rs_matter_embassy::matter::dm::clusters::app::on_off::OnOffHooks as _;
 #[cfg(all(feature = "matter", not(feature = "measure")))]
 use rs_matter_embassy::matter::dm::clusters::desc::ClusterHandler as _;
 
-esp_bootloader_esp_idf::esp_app_desc!();
+// The long form, because the short one hardcodes `CARGO_PKG_VERSION` and would
+// stamp every build `0.1.0`. The descriptor is what the flasher page reads back
+// off the board, so it has to carry the same string as the artifact annotation —
+// otherwise "Read installed version" cannot tell two builds apart, which is
+// precisely when you need it. Every other argument is the short form's default.
+esp_bootloader_esp_idf::esp_app_desc!(
+    FIRMWARE_VERSION,
+    env!("CARGO_PKG_NAME"),
+    esp_bootloader_esp_idf::BUILD_TIME,
+    esp_bootloader_esp_idf::BUILD_DATE,
+    esp_bootloader_esp_idf::ESP_IDF_COMPATIBLE_VERSION,
+    esp_bootloader_esp_idf::MMU_PAGE_SIZE,
+    0,
+    u16::MAX,
+    esp_bootloader_esp_idf::SECURE_VERSION
+);
 
 /// Memory for the futures `rs-matter-stack` creates inside its `run*` methods,
 /// served by a bump allocator rather than the heap. `rs-matter-embassy`'s own
