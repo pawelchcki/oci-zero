@@ -72,6 +72,51 @@ explicitly gives `index.json`. `oci-zero` matches the archive's own path, so
 `web/flash.js` tries both spellings. On macOS, set `COPYFILE_DISABLE=1` to keep
 bsdtar from adding AppleDouble `._*` members.
 
+## `publish-static-registry.sh`
+
+Rearranges an OCI image layout into the tree a registry's **read** path is made of, so a
+bucket can serve `crane pull` with no server process:
+
+```console
+tools/publish-static-registry.sh --layout layout --name oci-zero/firmware \
+  --tag latest --output publish
+```
+
+```
+publish/
+  v2/<name>/manifests/<digest>   the index, and every manifest it reaches
+  v2/<name>/manifests/<tag>      a copy of the index bytes per tag
+  v2/<name>/blobs/<digest>       every config and layer
+  v2/<name>/tags/list
+  uploads.tsv                    path, content type, cache-control
+```
+
+The distribution spec's read path is three GET shapes — `/v2/`,
+`/v2/<name>/manifests/<ref>` and `/v2/<name>/blobs/<digest>` — so keys laid out to match
+*are* a registry. The write path (`/v2/.../blobs/uploads/`) is not implemented and is not
+meant to be: publishing is `aws s3 sync` of this directory.
+
+### Why `uploads.tsv` exists
+
+`aws s3 sync` sets one content type for a whole run, and a manifest served as
+`application/octet-stream` is not a manifest as far as a client is concerned. Blobs are many
+and uniformly opaque, so they go up in one sync; manifests are few and each carries its own
+media type, so they are listed for the caller to `aws s3 cp` individually. The file also
+carries `Cache-Control`: digests are immutable and cached for a year, tags for a minute.
+
+`.github/workflows/registry.yml` does both passes and then pulls every object back with
+`crane manifest` / `crane blob`, comparing byte for byte against the layout that produced it.
+
+### Two things to know
+
+- **Publishing replaces the repository.** The workflow syncs with `--delete` scoped to one
+  `<name>`, so a run publishes exactly the tags passed to it and drops the rest. That is the
+  only garbage collection a registry bucket can safely have: a blob is referenced by digest
+  from any number of manifests, so nothing can expire one by age.
+- **No `Docker-Content-Digest` header.** S3 serves a fixed set of response headers and that
+  is not among them. `crane`, `skopeo` and `containerd` compute the digest from the body; a
+  client that *requires* the header will not work against any static registry.
+
 ## `split-flash-image.py`
 
 Cuts an `espflash save-image --merge` image back into `bootloader.bin`,

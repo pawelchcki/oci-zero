@@ -1,0 +1,262 @@
+name: Static registry
+
+# Publishes a small artifact to the project's own static OCI registry and then pulls it
+# back with a real client. The registry is an S3 bucket behind CloudFront, laid out so that
+# the distribution spec's read path resolves against plain objects — see
+# tools/publish-static-registry.sh for the shape and why there is no write path.
+#
+# It exists because no public registry sends `Access-Control-Allow-Origin`, so the proxyless
+# page cannot fetch a manifest from GHCR, Docker Hub or ECR Public from inside a browser.
+# The CORS assertions at the end are therefore the point of this workflow, not a detail.
+
+on:
+  # On pull_request as well as main, deliberately. The publish path is credentials, IAM
+  # policy and cache headers; none of that can be reviewed by reading a diff, and a workflow
+  # that only runs after merge finds the break on main. Fork PRs simply skip: GitHub refuses
+  # `id-token: write` to a fork's workflow, so the role cannot be assumed and the repository
+  # variables are unset anyway.
+  pull_request:
+    paths:
+      - tools/publish-static-registry.sh
+      - tools/build-firmware-artifact.sh
+      - .github/workflows/registry.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/publish-static-registry.sh
+      - tools/build-firmware-artifact.sh
+      - .github/workflows/registry.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a run that has already uploaded: a cancelled publish can leave a tag pointing
+# at a manifest whose blobs were deleted by the next run's `sync --delete`.
+concurrency:
+  group: registry-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Same pin and checksum as firmware.yml — one tool, one version, verified both places.
+  CRANE_VERSION: "0.21.7"
+  CRANE_SHA256: "1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230"
+
+jobs:
+  publish:
+    name: Publish and pull back
+    runs-on: ubuntu-latest
+    # Unset on forks and on anyone else's clone, where the infrastructure does not exist.
+    # Skipping is right here: a red X on a fork PR would be reporting our account's absence
+    # as the contributor's failure.
+    if: vars.OCI_REGISTRY_BUCKET != ''
+    permissions:
+      contents: read
+      id-token: write # OIDC, so there is no AWS key to store or rotate
+    env:
+      HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      BUCKET: ${{ vars.OCI_REGISTRY_BUCKET }}
+      DISTRIBUTION: ${{ vars.OCI_REGISTRY_DISTRIBUTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install crane
+        run: |
+          set -eu
+          curl -fsSLo /tmp/crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum --check
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          sudo install -m 0755 /tmp/crane /usr/local/bin/crane
+          crane version
+
+      # A PR gets its own repository name rather than its own tag, because the publisher
+      # deletes whatever is under the name it is given (`sync --delete`, the only garbage
+      # collection a registry bucket can safely have). Sharing a name across concurrent PRs
+      # would mean each run deleting the others' blobs.
+      - name: Choose the target repository
+        id: target
+        run: |
+          set -eu
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            echo "name=oci-zero/ci/pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=oci-zero/ci/main" >> "$GITHUB_OUTPUT"
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Synthetic, not the real ESP32 firmware: this workflow is testing the publish path,
+      # and a cross-compile would add ten minutes to a job that proves nothing more. It goes
+      # through build-firmware-artifact.sh rather than hand-writing JSON so the bytes have
+      # the same shape as a real artifact — vendor media types, an index, a gzip layer.
+      - name: Build a small artifact
+        id: layout
+        run: |
+          set -eu
+          printf 'oci-zero static registry smoke test %s\n' "$GITHUB_SHA" > payload.bin
+          ./tools/build-firmware-artifact.sh \
+            --image payload.bin:0x10000 \
+            --version "0.0.0-ci+sha.$(git rev-parse --short=7 HEAD)" \
+            --revision "$GITHUB_SHA" \
+            --output layout \
+            --summary layout.env
+          cat layout.env >> "$GITHUB_OUTPUT"
+
+      - name: Lay it out as a registry tree
+        id: publish
+        run: |
+          set -eu
+          ./tools/publish-static-registry.sh \
+            --layout layout \
+            --name '${{ steps.target.outputs.name }}' \
+            --tag latest \
+            --output publish >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v5.0.0
+        with:
+          role-to-assume: ${{ vars.OCI_REGISTRY_ROLE_ARN }}
+          aws-region: ${{ vars.OCI_REGISTRY_REGION }}
+
+      # Two passes, because `aws s3 sync` sets one content type for the whole run and a
+      # manifest served as octet-stream is not a manifest as far as a client is concerned.
+      # The sync is what deletes keys this build no longer produces; the copies then fix the
+      # handful of objects whose type and freshness matter. Doing it in this order means a
+      # manifest is briefly served with the wrong type, which the invalidation below clears
+      # before anything reads it.
+      - name: Upload
+        run: |
+          set -eu
+          aws s3 sync "publish/v2/${NAME}/" "s3://${BUCKET}/v2/${NAME}/" \
+            --delete --no-progress \
+            --content-type application/octet-stream \
+            --cache-control 'public, max-age=31536000, immutable'
+
+          while IFS=$'\t' read -r path ctype cachecontrol; do
+            [ -n "$path" ] || continue
+            aws s3 cp "publish/${path}" "s3://${BUCKET}/${path}" --no-progress \
+              --content-type "$ctype" --cache-control "$cachecontrol"
+          done < publish/uploads.tsv
+        env:
+          NAME: ${{ steps.target.outputs.name }}
+
+      # Two wildcard paths rather than one per object: invalidation is billed per path after
+      # the first 1,000 a month, and a digest path contains a colon, which CloudFront's path
+      # parser is not worth arguing with.
+      - name: Invalidate what changed
+        run: |
+          set -eu
+          id=$(aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION" \
+            --paths "/v2/${NAME}/manifests/*" "/v2/${NAME}/tags/*" \
+            --query 'Invalidation.Id' --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DISTRIBUTION" --id "$id"
+        env:
+          NAME: ${{ steps.target.outputs.name }}
+
+      - name: The registry answers the OCI version check
+        run: |
+          set -eu
+          code=$(curl -fsS -o /tmp/v2.json -w '%{http_code}' "https://${HOST}/v2/")
+          echo "GET /v2/ -> $code $(cat /tmp/v2.json)"
+          test "$code" = "200"
+
+      - name: crane resolves the tag to the digest we published
+        run: |
+          set -eu
+          remote=$(crane digest "${HOST}/${NAME}:latest")
+          echo "remote:   $remote"
+          echo "expected: ${{ steps.publish.outputs.index_digest }}"
+          test "$remote" = '${{ steps.publish.outputs.index_digest }}'
+        env:
+          NAME: ${{ steps.target.outputs.name }}
+
+      # The strongest assertion available: fetch every object back through the registry API
+      # and compare it with the bytes that went in. A wrong content type, a truncated object
+      # or a CloudFront transformation all surface here as a byte difference rather than as
+      # a subtly broken artifact discovered much later.
+      #
+      # `crane manifest` and `crane blob` rather than `crane pull`: these are the two GET
+      # shapes the spec defines, and they carry no opinion about what the content is. `crane
+      # pull` resolves through crane's image model, which a vendor artifactType and a config
+      # that is not an image config do not fit — it would be testing crane's tolerance for
+      # this artifact, not the registry's correctness.
+      - name: crane fetches every object back byte for byte
+        run: |
+          set -eu
+
+          # uploads.tsv lists exactly the objects published as manifests; everything else in
+          # the layout is a blob. That is the same split the registry serves them under.
+          manifests=$(cut -f1 publish/uploads.tsv | sed -n 's|.*/manifests/\(sha256:.*\)$|\1|p')
+
+          for digest in $manifests; do
+            crane manifest "${HOST}/${NAME}@${digest}" > /tmp/fetched
+            cmp "layout/blobs/sha256/${digest#sha256:}" /tmp/fetched
+            echo "manifest identical: $digest"
+          done
+
+          for blob in layout/blobs/sha256/*; do
+            hex=$(basename "$blob")
+            case " $manifests " in
+              *" sha256:$hex "*) continue ;;
+            esac
+            crane blob "${HOST}/${NAME}@sha256:${hex}" > /tmp/fetched
+            cmp "$blob" /tmp/fetched
+            echo "blob identical: sha256:$hex"
+          done
+        env:
+          NAME: ${{ steps.target.outputs.name }}
+
+      # Why this registry exists. If these fail, the proxyless page is back to needing a
+      # proxy and there is no reason to be paying for a bucket.
+      - name: A browser can read it
+        run: |
+          set -eu
+          manifest="https://${HOST}/v2/${NAME}/manifests/latest"
+
+          echo "--- preflight ---"
+          curl -fsS -X OPTIONS -D /tmp/preflight -o /dev/null \
+            -H 'Origin: https://example.invalid' \
+            -H 'Access-Control-Request-Method: GET' \
+            -H 'Access-Control-Request-Headers: accept' \
+            "$manifest"
+          cat /tmp/preflight
+          grep -qi '^access-control-allow-origin: \*' /tmp/preflight
+
+          echo "--- actual request ---"
+          curl -fsS -D /tmp/headers -o /tmp/manifest.json \
+            -H 'Origin: https://example.invalid' \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "$manifest"
+          cat /tmp/headers
+          grep -qi '^access-control-allow-origin: \*' /tmp/headers
+          grep -qi '^content-type: application/vnd.oci.image.index.v1+json' /tmp/headers
+
+          # Compression must stay off on the distribution. A gzipped manifest makes
+          # Content-Length describe the compressed body while the client holds the
+          # decompressed one, so a client that checks a descriptor's size against the header
+          # rejects a manifest that is perfectly valid. Assert the absence, because the
+          # setting is one checkbox away and the symptom would be baffling.
+          if grep -qi '^content-encoding:' /tmp/headers; then
+            echo "the distribution is compressing responses; see cloudfront.tf in my-infra" >&2
+            exit 1
+          fi
+
+          declared=$(grep -i '^content-length:' /tmp/headers | tr -d '\r' | awk '{print $2}')
+          actual=$(wc -c < /tmp/manifest.json)
+          echo "content-length: $declared, body: $actual"
+          test "$declared" = "$actual"
+        env:
+          NAME: ${{ steps.target.outputs.name }}
+
+      # A PR's namespace is scaffolding. Removing it also exercises the s3:DeleteObject half
+      # of the publish policy, which nothing else in this workflow touches.
+      - name: Remove the pull request's namespace
+        if: always() && steps.target.outputs.ephemeral == 'true'
+        # Never the reason a run is red. If the failure above was the credentials step this
+        # cannot work anyway, and reporting a cleanup error would bury the real one.
+        continue-on-error: true
+        run: aws s3 rm "s3://${BUCKET}/v2/${NAME}/" --recursive --only-show-errors
+        env:
+          NAME: ${{ steps.target.outputs.name }}
