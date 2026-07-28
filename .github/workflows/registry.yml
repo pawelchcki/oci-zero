@@ -192,7 +192,15 @@ jobs:
 
           for digest in $manifests; do
             crane manifest "${HOST}/${NAME}@${digest}" > /tmp/fetched
-            cmp "layout/blobs/sha256/${digest#sha256:}" /tmp/fetched
+            # The index is the layout's root document and lives at index.json, not under
+            # blobs/ — an OCI layout stores everything it *references* as a blob but not the
+            # entry point itself. Every other manifest is reached through it and so is a blob.
+            if [ "$digest" = "$INDEX_DIGEST" ]; then
+              source=layout/index.json
+            else
+              source="layout/blobs/sha256/${digest#sha256:}"
+            fi
+            cmp "$source" /tmp/fetched
             echo "manifest identical: $digest"
           done
 
@@ -207,6 +215,7 @@ jobs:
           done
         env:
           NAME: ${{ steps.target.outputs.name }}
+          INDEX_DIGEST: ${{ steps.publish.outputs.index_digest }}
 
       # Why this registry exists. If these fail, the proxyless page is back to needing a
       # proxy and there is no reason to be paying for a bucket.
