@@ -188,7 +188,12 @@ jobs:
 
           # uploads.tsv lists exactly the objects published as manifests; everything else in
           # the layout is a blob. That is the same split the registry serves them under.
-          manifests=$(cut -f1 publish/uploads.tsv | sed -n 's|.*/manifests/\(sha256:.*\)$|\1|p')
+          # Space-separated, because the skip test below is a glob against " $manifests ".
+          # Left as newlines it silently never matches, and the loop then asks for a
+          # manifest through the blobs endpoint — which any registry refuses, because
+          # manifests and blobs are separate namespaces.
+          manifests=$(cut -f1 publish/uploads.tsv \
+            | sed -n 's|.*/manifests/\(sha256:.*\)$|\1|p' | tr '\n' ' ')
 
           for digest in $manifests; do
             crane manifest "${HOST}/${NAME}@${digest}" > /tmp/fetched
