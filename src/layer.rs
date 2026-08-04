@@ -500,11 +500,19 @@ impl fmt::Display for LayerFormatError {
 #[cfg(test)]
 mod tests {
     use sha2::{Digest as _, Sha256};
+    use std::string::ToString;
 
-    use super::{Decoder, LayerApplier, VerifiedDecoder, VerifiedEntryExtractor};
+    use super::{
+        encoding, ApplyError, Decoder, Encoding, EntryLayerError, LayerApplier, LayerError,
+        LayerFormatError, VerifiedDecoder, VerifiedEntryExtractor, DOCKER_FOREIGN_LAYER_GZIP,
+        DOCKER_LAYER_GZIP, DOCKER_LAYER_TAR, OCI_LAYER_GZIP, OCI_LAYER_TAR, OCI_LAYER_ZSTD,
+        OCI_NONDISTRIBUTABLE_GZIP, OCI_NONDISTRIBUTABLE_TAR, OCI_NONDISTRIBUTABLE_ZSTD,
+    };
     use crate::{
         digest::Digest,
-        tar::{Archive, ArchiveBuffers, Entry, LayerEventSink, TransactionalLayerSink},
+        tar::{
+            Archive, ArchiveBuffers, Entry, FinishError, LayerEventSink, TransactionalLayerSink,
+        },
     };
 
     #[derive(Default)]
@@ -555,10 +563,53 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_every_supported_layer_media_type() {
+        for media_type in [OCI_LAYER_TAR, OCI_NONDISTRIBUTABLE_TAR, DOCKER_LAYER_TAR] {
+            assert_eq!(encoding(media_type).unwrap(), Encoding::Tar);
+        }
+        for media_type in [
+            OCI_LAYER_GZIP,
+            OCI_NONDISTRIBUTABLE_GZIP,
+            DOCKER_LAYER_GZIP,
+            DOCKER_FOREIGN_LAYER_GZIP,
+        ] {
+            assert_eq!(encoding(media_type).unwrap(), Encoding::Gzip);
+        }
+        for media_type in [OCI_LAYER_ZSTD, OCI_NONDISTRIBUTABLE_ZSTD] {
+            assert_eq!(encoding(media_type).unwrap(), Encoding::Zstd);
+        }
+        assert!(matches!(
+            encoding("application/octet-stream"),
+            Err(LayerFormatError::UnsupportedMediaType)
+        ));
+    }
+
+    #[test]
+    fn formats_layer_errors() {
+        assert_eq!(
+            EntryLayerError::<&str>::Finish(FinishError::NotFound).to_string(),
+            "entry extraction failed: tar entry not found"
+        );
+        assert_eq!(
+            ApplyError::<&str>::InvalidState.to_string(),
+            "invalid layer application state"
+        );
+        assert_eq!(
+            LayerError::Output("callback").to_string(),
+            "layer output error: callback"
+        );
+        assert_eq!(
+            LayerFormatError::UnsupportedMediaType.to_string(),
+            "unsupported OCI layer media type"
+        );
+    }
+
+    #[test]
     fn verifies_uncompressed_layers() {
         let bytes = b"tar bytes";
         let digest = Digest::from_bytes(Sha256::digest(bytes).into());
         let mut decoder = VerifiedDecoder::new(Decoder::tar(), digest, bytes.len() as u64, digest);
+        assert_eq!(decoder.compressed_size(), 0);
         let mut output = [0; 9];
         let mut length = 0;
         decoder
@@ -568,6 +619,7 @@ mod tests {
                 Ok::<_, ()>(())
             })
             .unwrap();
+        assert_eq!(decoder.compressed_size(), bytes.len() as u64);
         decoder.finish(|_| Ok::<_, ()>(())).unwrap();
         assert_eq!(&output, bytes);
     }
@@ -615,6 +667,8 @@ mod tests {
         let digest = Digest::from_bytes(Sha256::digest(tar).into());
         let decoder = VerifiedDecoder::new(Decoder::tar(), digest, tar.len() as u64, digest);
         let mut extractor = VerifiedEntryExtractor::new(decoder, b"wanted");
+        assert!(!extractor.found());
+        assert_eq!(extractor.compressed_size(), 0);
         let mut output = [0u8; 5];
         let mut length = 0;
         for fragment in tar.chunks(7) {
@@ -626,10 +680,25 @@ mod tests {
                 })
                 .unwrap();
         }
+        assert!(extractor.found());
+        assert_eq!(extractor.compressed_size(), tar.len() as u64);
         extractor.finish(|_| Ok::<_, ()>(())).unwrap();
         assert_eq!(&output, b"hello");
         assert_eq!(extractor.decompressed_size(), tar.len() as u64);
         assert_eq!(extractor.extracted_size(), 5);
+    }
+
+    #[test]
+    fn entry_extractor_finish_reports_a_missing_target() {
+        let tar = [0u8; 1024];
+        let digest = Digest::from_bytes(Sha256::digest(tar).into());
+        let decoder = VerifiedDecoder::new(Decoder::tar(), digest, tar.len() as u64, digest);
+        let mut extractor = VerifiedEntryExtractor::new(decoder, b"missing");
+        extractor.push(&tar, |_| Ok::<_, ()>(())).unwrap();
+        assert!(matches!(
+            extractor.finish(|_| Ok::<_, ()>(())),
+            Err(EntryLayerError::Finish(FinishError::NotFound))
+        ));
     }
 
     fn write_octal(field: &mut [u8], value: u64) {
@@ -664,6 +733,27 @@ mod tests {
         applier.finish(&mut sink).unwrap();
         assert!(sink.committed);
         assert!(!sink.aborted);
+    }
+
+    #[test]
+    fn finish_starts_a_ready_transaction_before_reporting_failure() {
+        let digest = Digest::from_bytes(Sha256::digest([]).into());
+        let mut path = [0; 64];
+        let mut link = [0; 64];
+        let mut pax = [0; 64];
+        let archive = Archive::new(ArchiveBuffers {
+            path: &mut path,
+            link: &mut link,
+            pax: &mut pax,
+        });
+        let decoder = VerifiedDecoder::new(Decoder::tar(), digest, 0, digest);
+        let mut applier = LayerApplier::new(decoder, archive);
+        let mut sink = TransactionSink::default();
+
+        assert!(applier.finish(&mut sink).is_err());
+        assert!(sink.began);
+        assert!(sink.aborted);
+        assert!(!sink.committed);
     }
 
     #[test]
@@ -722,6 +812,18 @@ mod tests {
         assert_eq!(&output, b"hello");
     }
 
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn gzip_decoder_finish_rejects_a_truncated_header() {
+        let mut history = [0; gzip_zero::HISTORY_SIZE];
+        let mut decoder = Decoder::gzip(gzip_zero::DecoderBuffers {
+            history: &mut history,
+        })
+        .unwrap();
+        decoder.decode(&[0x1f]).unwrap();
+        assert!(decoder.finish().is_err());
+    }
+
     #[cfg(feature = "zstd")]
     #[test]
     fn verifies_zstd_layers() {
@@ -750,5 +852,63 @@ mod tests {
             .unwrap();
         decoder.finish(|_| Ok::<_, ()>(())).unwrap();
         assert_eq!(&output, b"hello");
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn finish_accounts_for_buffered_zstd_output() {
+        // A 1 KiB window is moved one byte by the first block. The second block
+        // then wraps, leaving its final byte buffered until finish().
+        let encoded = [
+            0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, // frame, 1 KiB window
+            0x0a, 0x00, 0x00, b'a', // non-final RLE block, size 1
+            0x03, 0x20, 0x00, b'b', // final RLE block, size 1024
+        ];
+        let mut decoded = std::vec![b'b'; 1025];
+        decoded[0] = b'a';
+        let compressed = Digest::from_bytes(Sha256::digest(encoded).into());
+        let diff_id = Digest::from_bytes(Sha256::digest(&decoded).into());
+        let mut history = [0; 1024];
+        let mut block = [0; 1];
+        let mut literals = [];
+        let decoder = Decoder::zstd(zstd_zero::DecoderBuffers {
+            history: &mut history,
+            block: &mut block,
+            literals: &mut literals,
+        });
+        let mut decoder = VerifiedDecoder::new(decoder, compressed, encoded.len() as u64, diff_id);
+        let mut output = std::vec::Vec::new();
+
+        decoder
+            .push(&encoded, |bytes| {
+                output.extend_from_slice(bytes);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(decoder.decompressed_size(), 1024);
+        decoder
+            .finish(|bytes| {
+                output.extend_from_slice(bytes);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+
+        assert_eq!(decoder.decompressed_size(), 1025);
+        assert_eq!(output, decoded);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_decoder_finish_rejects_a_truncated_header() {
+        let mut history = [0; 1];
+        let mut block = [0; 1];
+        let mut literals = [0; 1];
+        let mut decoder = Decoder::zstd(zstd_zero::DecoderBuffers {
+            history: &mut history,
+            block: &mut block,
+            literals: &mut literals,
+        });
+        decoder.decode(&[0x28]).unwrap();
+        assert!(decoder.finish().is_err());
     }
 }
