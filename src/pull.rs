@@ -358,10 +358,11 @@ impl<F: fmt::Display, V: fmt::Display> fmt::Display for PullError<F, V> {
 #[cfg(test)]
 mod tests {
     use core::{future::Future, task::Poll};
-    use std::{sync::Arc, task::Wake};
+    use std::{string::ToString, sync::Arc, task::Wake};
 
     use super::{
-        pull, BlobAction, BlobKind, BlobSink, Fetcher, ManifestReference, PullBuffers, PullVisitor,
+        pull, BlobAction, BlobKind, BlobSink, BufferSink, Fetcher, ManifestReference, PullBuffers,
+        PullError, PullVisitor, Selection, VisitorSink,
     };
     use crate::{metadata::Descriptor, reference::Reference};
 
@@ -397,6 +398,16 @@ mod tests {
     }"#;
 
     const IMAGE_CONFIG: &[u8] = br#"{"rootfs":{"type":"layers","diff_ids":["sha256:2222222222222222222222222222222222222222222222222222222222222222"]}}"#;
+
+    const INDEX: &[u8] = br#"{
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "size": 0
+        }]
+    }"#;
 
     struct MockFetcher;
 
@@ -456,6 +467,43 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct IndexFetcher {
+        manifest_calls: usize,
+    }
+
+    impl Fetcher for IndexFetcher {
+        type Error = ();
+
+        async fn manifest(
+            &mut self,
+            _reference: ManifestReference<'_>,
+            destination: &mut [u8],
+        ) -> Result<usize, Self::Error> {
+            let document = if self.manifest_calls == 0 {
+                INDEX
+            } else {
+                MANIFEST
+            };
+            self.manifest_calls += 1;
+            destination[..document.len()].copy_from_slice(document);
+            Ok(document.len())
+        }
+
+        async fn blob<S: BlobSink>(
+            &mut self,
+            descriptor: Descriptor<'_>,
+            sink: &mut S,
+        ) -> Result<(), Self::Error> {
+            if descriptor.media_type().as_str() == Some("application/vnd.example.config") {
+                sink.chunk(b"not json");
+            } else {
+                sink.chunk(b"layer");
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct Visitor {
         config_bytes: usize,
         layer_bytes: usize,
@@ -484,6 +532,19 @@ mod tests {
                 BlobKind::Layer { .. } => self.layer_bytes += bytes.len(),
             }
             Ok(())
+        }
+    }
+
+    struct SkipVisitor;
+
+    impl PullVisitor for SkipVisitor {
+        type Error = ();
+
+        fn select_manifest(
+            &mut self,
+            _descriptor: Descriptor<'_>,
+        ) -> Result<Selection, Self::Error> {
+            Ok(Selection::Skip)
         }
     }
 
@@ -529,6 +590,114 @@ mod tests {
         );
         assert!(block_on_ready(future).is_ok());
         assert!(visitor.layer_diff_id_was_some);
+    }
+
+    #[test]
+    fn accepts_manifest_buffers_at_their_exact_contract_size() {
+        let mut fetcher = MockFetcher;
+        let mut visitor = Visitor::default();
+        let mut root = [0; MANIFEST.len()];
+        let mut child = [0; 1];
+        let mut config = [0; 8];
+        let result = block_on_ready(pull(
+            &mut fetcher,
+            Reference::parse("oci://example.com/artifact:latest").unwrap(),
+            PullBuffers {
+                root_manifest: &mut root,
+                child_manifest: &mut child,
+                config: &mut config,
+            },
+            &mut visitor,
+        ));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pulls_index_children_with_exact_and_roomy_buffers() {
+        for exact in [true, false] {
+            let mut fetcher = IndexFetcher::default();
+            let mut visitor = Visitor::default();
+            let mut root = [0; INDEX.len()];
+            let mut child = [0; 1024];
+            let child = if exact {
+                &mut child[..MANIFEST.len()]
+            } else {
+                &mut child[..]
+            };
+            let mut config = [0; 8];
+            let result = block_on_ready(pull(
+                &mut fetcher,
+                Reference::parse("oci://example.com/artifact:latest").unwrap(),
+                PullBuffers {
+                    root_manifest: &mut root,
+                    child_manifest: child,
+                    config: &mut config,
+                },
+                &mut visitor,
+            ));
+            assert!(result.is_ok());
+            assert_eq!(fetcher.manifest_calls, 2);
+        }
+    }
+
+    #[test]
+    fn skips_unselected_index_children() {
+        let mut fetcher = IndexFetcher::default();
+        let mut visitor = SkipVisitor;
+        let mut root = [0; INDEX.len()];
+        let mut child = [0; MANIFEST.len()];
+        let mut config = [0; 8];
+        let result = block_on_ready(pull(
+            &mut fetcher,
+            Reference::parse("oci://example.com/artifact:latest").unwrap(),
+            PullBuffers {
+                root_manifest: &mut root,
+                child_manifest: &mut child,
+                config: &mut config,
+            },
+            &mut visitor,
+        ));
+        assert!(result.is_ok());
+        assert_eq!(fetcher.manifest_calls, 1);
+    }
+
+    #[test]
+    fn reports_sink_cancellation_state() {
+        struct DefaultSink;
+        impl BlobSink for DefaultSink {
+            fn chunk(&mut self, _bytes: &[u8]) {}
+        }
+        assert!(!DefaultSink.cancelled());
+
+        let mut buffer = [0; 1];
+        let mut sink = BufferSink::new(&mut buffer);
+        assert!(!sink.cancelled());
+        sink.chunk(b"ab");
+        assert!(sink.cancelled());
+
+        struct FailingVisitor;
+        impl PullVisitor for FailingVisitor {
+            type Error = &'static str;
+
+            fn blob_data(&mut self, _kind: BlobKind, _bytes: &[u8]) -> Result<(), Self::Error> {
+                Err("stop")
+            }
+        }
+        let mut visitor = FailingVisitor;
+        let mut sink = VisitorSink {
+            visitor: &mut visitor,
+            kind: BlobKind::Config,
+            error: None,
+        };
+        assert!(!sink.cancelled());
+        sink.chunk(b"data");
+        assert!(sink.cancelled());
+    }
+
+    #[test]
+    fn formats_pull_errors() {
+        let error = PullError::<&str, &str>::BufferContract;
+        assert_eq!(error.to_string(), "fetcher returned an out-of-range length");
     }
 
     fn block_on_ready<F: Future>(future: F) -> F::Output {

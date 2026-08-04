@@ -1166,8 +1166,9 @@ fn decimal(bytes: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Archive, ArchiveBuffers, ArchiveError, Entry, EntryExtractor, EntryKind, ExtractError,
-        FinishError, LayerEventSink, TarWriteError, TarWriter, BLOCK_SIZE,
+        header_path, normalize_path, validate_pax, validate_symbolic_link, Archive, ArchiveBuffers,
+        ArchiveError, Entry, EntryExtractor, EntryKind, ExtractError, FinishError, LayerEventSink,
+        TarWriteError, TarWriter, BLOCK_SIZE,
     };
     use std::{format, string::ToString, vec::Vec};
 
@@ -1366,6 +1367,66 @@ mod tests {
             archive.push(&bytes, &mut Events::default()),
             Err(ArchiveError::InvalidLink)
         );
+    }
+
+    #[test]
+    fn resolves_symbolic_link_target_components_before_checking_depth() {
+        assert_eq!(
+            validate_symbolic_link::<()>(b"link", b"dir/../target"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_symbolic_link::<()>(b"dir/link", b"./../../escape"),
+            Err(ArchiveError::InvalidLink)
+        );
+        assert_eq!(
+            validate_symbolic_link::<()>(b"dir/link", b"nested//../../../escape"),
+            Err(ArchiveError::InvalidLink)
+        );
+    }
+
+    #[test]
+    fn joins_ustar_name_and_prefix_with_exact_buffer_bounds() {
+        let mut header = [0; BLOCK_SIZE];
+        header[..4].copy_from_slice(b"name");
+        header[345..351].copy_from_slice(b"prefix");
+
+        let mut exact = [0; 11];
+        assert_eq!(header_path::<()>(&header, &mut exact), Ok(11));
+        assert_eq!(&exact, b"prefix/name");
+
+        let mut too_small = [0; 10];
+        assert!(header_path::<()>(&header, &mut too_small).is_err());
+
+        header[345..351].fill(0);
+        let mut name_only = [0; 4];
+        assert_eq!(header_path::<()>(&header, &mut name_only), Ok(4));
+        assert_eq!(&name_only, b"name");
+    }
+
+    #[test]
+    fn normalizes_paths_and_rejects_invalid_inputs() {
+        let mut path = *b"./a//b/./";
+        let length = normalize_path::<()>(&mut path, 9).unwrap();
+        assert_eq!(&path[..length], b"a/b");
+
+        let mut dot = [b'.'];
+        let length = normalize_path::<()>(&mut dot, 1).unwrap();
+        assert_eq!(&dot[..length], b".");
+
+        for invalid in [b"".as_slice(), b"/root", b"a\0b", b"../root"] {
+            let mut path = [0; 16];
+            path[..invalid.len()].copy_from_slice(invalid);
+            assert_eq!(
+                normalize_path::<()>(&mut path, invalid.len()),
+                Err(ArchiveError::InvalidPath)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_pax_records() {
+        assert!(validate_pax::<()>(b"garbage").is_err());
     }
 
     #[test]
