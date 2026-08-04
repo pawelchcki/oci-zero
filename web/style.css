@@ -117,7 +117,15 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
 .result-list button:hover, .tag-grid button:hover { background: var(--soft); }
 .platforms { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
 .descriptor { display: grid; grid-template-columns: minmax(150px, 1fr) 1fr 100px; gap: .7rem; padding: .55rem 0; border-bottom: 1px solid #edf0f2; font-size: .82rem; }
-.descriptor code { overflow-wrap: anywhere; }
+/* Both children, not just the digest. A media type is one unbreakable token --
+   `application/vnd.oci.image.config.v1+json` has no space and no default break
+   opportunity -- and the single-column `.descriptor` at <=850px is a `1fr` track,
+   whose automatic minimum is min-content. So the widest media type sets a floor
+   the row cannot go below, and at 320px it pushes the page into horizontal scroll.
+   `anywhere` rather than `break-word` because only `anywhere` also shrinks the
+   min-content size that the track is sized from; `break-word` wraps the glyphs
+   and leaves the overflow. */
+.descriptor code, .descriptor strong { overflow-wrap: anywhere; }
 .actions { display: flex; gap: .4rem; flex-wrap: wrap; justify-content: flex-end; }
 details { margin-top: 1rem; }
 summary { cursor: pointer; color: var(--accent-dark); font-weight: 650; }
