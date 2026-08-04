@@ -1351,6 +1351,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_symbolic_link_targets_that_escape_the_root() {
+        let mut bytes = Vec::new();
+        append_link(&mut bytes, b"dir/link", b"../../escape", b'2');
+        let mut path = [0; 64];
+        let mut link = [0; 64];
+        let mut pax = [0; 64];
+        let mut archive = Archive::new(ArchiveBuffers {
+            path: &mut path,
+            link: &mut link,
+            pax: &mut pax,
+        });
+        assert_eq!(
+            archive.push(&bytes, &mut Events::default()),
+            Err(ArchiveError::InvalidLink)
+        );
+    }
+
+    #[test]
     fn extracts_a_regular_file_from_arbitrary_fragments() {
         let mut archive = Vec::new();
         append_entry(&mut archive, b"first", b"skip", b'0', b"");
