@@ -1410,7 +1410,7 @@ mod tests {
         let length = normalize_path::<()>(&mut path, 9).unwrap();
         assert_eq!(&path[..length], b"a/b");
 
-        let mut dot = [b'.'];
+        let mut dot = *b".";
         let length = normalize_path::<()>(&mut dot, 1).unwrap();
         assert_eq!(&dot[..length], b".");
 
