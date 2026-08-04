@@ -152,7 +152,21 @@ sha256_hex() {
 }
 
 blobs="$output/blobs/sha256"
-rm -rf "$output"
+if [ -L "$output" ]; then
+    echo "refusing to replace symlink output path: $output" >&2
+    exit 1
+fi
+if [ -e "$output" ]; then
+    if [ ! -d "$output" ] \
+        || [ ! -f "$output/oci-layout" ] \
+        || [ ! -f "$output/index.json" ] \
+        || [ ! -d "$output/blobs/sha256" ] \
+        || [ "$(jq -r '.imageLayoutVersion // empty' "$output/oci-layout" 2>/dev/null)" != "1.0.0" ]; then
+        echo "refusing to replace output path that is not an OCI image layout: $output" >&2
+        exit 1
+    fi
+fi
+rm -rf -- "$output"
 mkdir -p "$blobs"
 
 # Adds $1 to the blob store and prints its hex digest.

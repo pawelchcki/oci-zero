@@ -48,6 +48,7 @@ jobs:
           node --check web/tests/server.mjs
           python3 -m json.tool web/manifest.json > /dev/null
           sh -n tools/build-firmware-artifact.sh
+          tools/test-build-firmware-artifact.sh
           # bash, not sh: the walk over a nested index recurses and uses arrays.
           bash -n tools/publish-static-registry.sh
       # The QR code committed to examples/esp32c3-ota/README.md is generated from

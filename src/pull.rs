@@ -218,8 +218,9 @@ where
             .map_err(PullError::Visitor)?;
     }
 
-    let config_media_type = config.media_type().as_str().unwrap_or("");
-    let image_config = matches!(config_media_type, OCI_IMAGE_CONFIG | DOCKER_IMAGE_CONFIG);
+    let config_media_type = config.media_type();
+    let image_config = config_media_type.decoded_eq_ascii(OCI_IMAGE_CONFIG)
+        || config_media_type.decoded_eq_ascii(DOCKER_IMAGE_CONFIG);
     let mut diff_ids = if image_config {
         let config_document =
             ImageConfig::parse(&config_buffer[..config_length]).map_err(PullError::Metadata)?;
@@ -380,6 +381,23 @@ mod tests {
         }]
     }"#;
 
+    const ESCAPED_MEDIA_TYPE_MANIFEST: &[u8] = br#"{
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application\/vnd.oci.image.config.v1+json",
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "size": 115
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "size": 5
+        }]
+    }"#;
+
+    const IMAGE_CONFIG: &[u8] = br#"{"rootfs":{"type":"layers","diff_ids":["sha256:2222222222222222222222222222222222222222222222222222222222222222"]}}"#;
+
     struct MockFetcher;
 
     impl Fetcher for MockFetcher {
@@ -408,11 +426,41 @@ mod tests {
         }
     }
 
+    struct EscapedMediaTypeFetcher;
+
+    impl Fetcher for EscapedMediaTypeFetcher {
+        type Error = ();
+
+        async fn manifest(
+            &mut self,
+            _reference: ManifestReference<'_>,
+            destination: &mut [u8],
+        ) -> Result<usize, Self::Error> {
+            destination[..ESCAPED_MEDIA_TYPE_MANIFEST.len()]
+                .copy_from_slice(ESCAPED_MEDIA_TYPE_MANIFEST);
+            Ok(ESCAPED_MEDIA_TYPE_MANIFEST.len())
+        }
+
+        async fn blob<S: BlobSink>(
+            &mut self,
+            descriptor: Descriptor<'_>,
+            sink: &mut S,
+        ) -> Result<(), Self::Error> {
+            if descriptor.media_type().encoded().contains("\\/") {
+                sink.chunk(IMAGE_CONFIG);
+            } else {
+                sink.chunk(b"layer");
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct Visitor {
         config_bytes: usize,
         layer_bytes: usize,
         layer_diff_id_was_none: bool,
+        layer_diff_id_was_some: bool,
     }
 
     impl PullVisitor for Visitor {
@@ -425,6 +473,7 @@ mod tests {
         ) -> Result<BlobAction, Self::Error> {
             if let BlobKind::Layer { diff_id } = kind {
                 self.layer_diff_id_was_none = diff_id.is_none();
+                self.layer_diff_id_was_some = diff_id.is_some();
             }
             Ok(BlobAction::Fetch)
         }
@@ -459,6 +508,27 @@ mod tests {
         assert_eq!(visitor.config_bytes, 8);
         assert_eq!(visitor.layer_bytes, 5);
         assert!(visitor.layer_diff_id_was_none);
+    }
+
+    #[test]
+    fn recognizes_escaped_image_config_media_types() {
+        let mut fetcher = EscapedMediaTypeFetcher;
+        let mut visitor = Visitor::default();
+        let mut root = [0; 1024];
+        let mut child = [0; 1024];
+        let mut config = [0; 256];
+        let future = pull(
+            &mut fetcher,
+            Reference::parse("oci://example.com/image:latest").unwrap(),
+            PullBuffers {
+                root_manifest: &mut root,
+                child_manifest: &mut child,
+                config: &mut config,
+            },
+            &mut visitor,
+        );
+        assert!(block_on_ready(future).is_ok());
+        assert!(visitor.layer_diff_id_was_some);
     }
 
     fn block_on_ready<F: Future>(future: F) -> F::Output {
