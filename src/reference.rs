@@ -369,9 +369,16 @@ impl fmt::Write for BufferWriter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::format;
+    use std::{format, string::ToString};
 
-    use super::{Reference, ReferenceError, Repository, Selector};
+    use super::{
+        validate_registry, validate_repository, validate_tag, Reference, ReferenceError,
+        Repository, Scheme, Selector,
+    };
+    use crate::digest::{Digest, DigestError};
+
+    const DIGEST_TEXT: &str =
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
     fn parses_tags_and_digests() {
@@ -380,13 +387,54 @@ mod tests {
         assert_eq!(tagged.repository(), "team/image");
         assert_eq!(tagged.selector(), Selector::Tag("v1.2"));
 
-        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        let input = format!("oci://example.com/image@{digest}");
+        let input = format!("oci://example.com/image@{DIGEST_TEXT}");
         let pinned = Reference::parse(&input).unwrap();
         let mut path = [0; 128];
         assert_eq!(
             pinned.manifest_path(&mut path).unwrap(),
-            format!("/v2/image/manifests/{digest}")
+            format!("/v2/image/manifests/{DIGEST_TEXT}")
+        );
+    }
+
+    #[test]
+    fn builds_every_repository_and_reference_path() {
+        let repository = Repository::parse("oci://example.com/team/image").unwrap();
+        let reference = repository.with_tag("latest").unwrap();
+        let digest = Digest::parse(DIGEST_TEXT).unwrap();
+        let mut path = [0; 128];
+
+        assert_eq!(
+            repository.manifest_digest_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/manifests/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            repository.blob_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/blobs/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            repository.referrers_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/referrers/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            repository.tags_path(&mut path).unwrap(),
+            "/v2/team/image/tags/list"
+        );
+
+        assert_eq!(
+            reference.manifest_digest_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/manifests/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            reference.blob_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/blobs/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            reference.referrers_path(digest, &mut path).unwrap(),
+            format!("/v2/team/image/referrers/{DIGEST_TEXT}")
+        );
+        assert_eq!(
+            reference.tags_path(&mut path).unwrap(),
+            "/v2/team/image/tags/list"
         );
     }
 
@@ -421,5 +469,126 @@ mod tests {
             Repository::parse("oci://example.com/image:tag"),
             Err(ReferenceError::InvalidRepository)
         );
+    }
+
+    #[test]
+    fn rejects_each_invalid_registry_authority_class() {
+        for registry in [
+            "",
+            "exämple.com",
+            "example .com",
+            "example/com",
+            "a@b",
+            "a?b",
+            "a#b",
+        ] {
+            assert_eq!(
+                validate_registry(registry),
+                Err(ReferenceError::InvalidRegistry),
+                "registry={registry:?}"
+            );
+        }
+        assert_eq!(validate_registry("example.com:5000"), Ok(()));
+    }
+
+    #[test]
+    fn enforces_repository_length_boundaries() {
+        assert_eq!(
+            validate_repository(""),
+            Err(ReferenceError::InvalidRepository)
+        );
+        assert_eq!(validate_repository(&"a".repeat(255)), Ok(()));
+        assert_eq!(
+            validate_repository(&"a".repeat(256)),
+            Err(ReferenceError::InvalidRepository)
+        );
+    }
+
+    #[test]
+    fn accepts_repository_separators_only_between_alphanumerics() {
+        for repository in ["a", "ab", "abc", "a.b", "a_b", "a-b", "a--b", "a/b"] {
+            assert_eq!(
+                validate_repository(repository),
+                Ok(()),
+                "repository={repository:?}"
+            );
+        }
+
+        for repository in [
+            "/a", "a/", "a//b", ".a", "a.", "a..b", "a__b", "a-.b", "a---_b", "a+B",
+        ] {
+            assert_eq!(
+                validate_repository(repository),
+                Err(ReferenceError::InvalidRepository),
+                "repository={repository:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_tag_character_and_length_rules() {
+        for tag in ["a", "_", "v1.2-alpha_3"] {
+            assert_eq!(validate_tag(tag), Ok(()), "tag={tag:?}");
+        }
+        assert_eq!(validate_tag(&format!("a{}", "b".repeat(127))), Ok(()));
+
+        for tag in [
+            "",
+            ".start",
+            "-start",
+            "has/slash",
+            "has:colon",
+            "nön-ascii",
+        ] {
+            assert_eq!(
+                validate_tag(tag),
+                Err(ReferenceError::InvalidTag),
+                "tag={tag:?}"
+            );
+        }
+        assert_eq!(
+            validate_tag(&"a".repeat(129)),
+            Err(ReferenceError::InvalidTag)
+        );
+    }
+
+    #[test]
+    fn formats_schemes_and_reference_errors() {
+        assert_eq!(Scheme::Http.to_string(), "http");
+        assert_eq!(Scheme::Https.to_string(), "https");
+
+        for (error, message) in [
+            (
+                ReferenceError::InvalidScheme,
+                "OCI reference must start with oci://",
+            ),
+            (
+                ReferenceError::InvalidRegistry,
+                "invalid OCI registry authority",
+            ),
+            (
+                ReferenceError::MissingRepository,
+                "OCI reference is missing a repository",
+            ),
+            (
+                ReferenceError::InvalidRepository,
+                "invalid OCI repository name",
+            ),
+            (
+                ReferenceError::MissingSelector,
+                "OCI reference is missing a tag or digest",
+            ),
+            (ReferenceError::InvalidTag, "invalid OCI tag"),
+            (
+                ReferenceError::Digest(DigestError::InvalidEncoding),
+                "invalid OCI digest",
+            ),
+            (
+                ReferenceError::BufferTooSmall,
+                "request path buffer is too small",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
     }
 }
