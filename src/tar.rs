@@ -1062,14 +1062,10 @@ fn normalize_path<E>(bytes: &mut [u8], length: usize) -> Result<usize, ArchiveEr
 }
 
 fn validate_symbolic_link<E>(path: &[u8], target: &[u8]) -> Result<(), ArchiveError<E>> {
-    if target.is_empty() || target.contains(&0) {
+    if target.is_empty() || target[0] == b'/' || target.contains(&0) {
         return Err(ArchiveError::InvalidLink);
     }
-    let mut depth = if target[0] == b'/' {
-        0
-    } else {
-        path.split(|byte| *byte == b'/').count().saturating_sub(1)
-    };
+    let mut depth = path.split(|byte| *byte == b'/').count().saturating_sub(1);
     for component in target.split(|byte| *byte == b'/') {
         match component {
             b"" | b"." => {}
@@ -1170,8 +1166,9 @@ fn decimal(bytes: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Archive, ArchiveBuffers, Entry, EntryExtractor, EntryKind, ExtractError, FinishError,
-        LayerEventSink, TarWriteError, TarWriter, BLOCK_SIZE,
+        header_path, normalize_path, validate_pax, validate_symbolic_link, Archive, ArchiveBuffers,
+        ArchiveError, Entry, EntryExtractor, EntryKind, ExtractError, FinishError, LayerEventSink,
+        TarWriteError, TarWriter, BLOCK_SIZE,
     };
     use std::{format, string::ToString, vec::Vec};
 
@@ -1337,6 +1334,102 @@ mod tests {
     }
 
     #[test]
+    fn rejects_absolute_symbolic_link_targets() {
+        let mut bytes = Vec::new();
+        append_link(&mut bytes, b"link", b"/etc/passwd", b'2');
+        let mut path = [0; 64];
+        let mut link = [0; 64];
+        let mut pax = [0; 64];
+        let mut archive = Archive::new(ArchiveBuffers {
+            path: &mut path,
+            link: &mut link,
+            pax: &mut pax,
+        });
+        assert_eq!(
+            archive.push(&bytes, &mut Events::default()),
+            Err(ArchiveError::InvalidLink)
+        );
+    }
+
+    #[test]
+    fn rejects_symbolic_link_targets_that_escape_the_root() {
+        let mut bytes = Vec::new();
+        append_link(&mut bytes, b"dir/link", b"../../escape", b'2');
+        let mut path = [0; 64];
+        let mut link = [0; 64];
+        let mut pax = [0; 64];
+        let mut archive = Archive::new(ArchiveBuffers {
+            path: &mut path,
+            link: &mut link,
+            pax: &mut pax,
+        });
+        assert_eq!(
+            archive.push(&bytes, &mut Events::default()),
+            Err(ArchiveError::InvalidLink)
+        );
+    }
+
+    #[test]
+    fn resolves_symbolic_link_target_components_before_checking_depth() {
+        assert_eq!(
+            validate_symbolic_link::<()>(b"link", b"dir/../target"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_symbolic_link::<()>(b"dir/link", b"./../../escape"),
+            Err(ArchiveError::InvalidLink)
+        );
+        assert_eq!(
+            validate_symbolic_link::<()>(b"dir/link", b"nested//../../../escape"),
+            Err(ArchiveError::InvalidLink)
+        );
+    }
+
+    #[test]
+    fn joins_ustar_name_and_prefix_with_exact_buffer_bounds() {
+        let mut header = [0; BLOCK_SIZE];
+        header[..4].copy_from_slice(b"name");
+        header[345..351].copy_from_slice(b"prefix");
+
+        let mut exact = [0; 11];
+        assert_eq!(header_path::<()>(&header, &mut exact), Ok(11));
+        assert_eq!(&exact, b"prefix/name");
+
+        let mut too_small = [0; 10];
+        assert!(header_path::<()>(&header, &mut too_small).is_err());
+
+        header[345..351].fill(0);
+        let mut name_only = [0; 4];
+        assert_eq!(header_path::<()>(&header, &mut name_only), Ok(4));
+        assert_eq!(&name_only, b"name");
+    }
+
+    #[test]
+    fn normalizes_paths_and_rejects_invalid_inputs() {
+        let mut path = *b"./a//b/./";
+        let length = normalize_path::<()>(&mut path, 9).unwrap();
+        assert_eq!(&path[..length], b"a/b");
+
+        let mut dot = *b".";
+        let length = normalize_path::<()>(&mut dot, 1).unwrap();
+        assert_eq!(&dot[..length], b".");
+
+        for invalid in [b"".as_slice(), b"/root", b"a\0b", b"../root"] {
+            let mut path = [0; 16];
+            path[..invalid.len()].copy_from_slice(invalid);
+            assert_eq!(
+                normalize_path::<()>(&mut path, invalid.len()),
+                Err(ArchiveError::InvalidPath)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_pax_records() {
+        assert!(validate_pax::<()>(b"garbage").is_err());
+    }
+
+    #[test]
     fn extracts_a_regular_file_from_arbitrary_fragments() {
         let mut archive = Vec::new();
         append_entry(&mut archive, b"first", b"skip", b'0', b"");
@@ -1446,6 +1539,16 @@ mod tests {
         archive.extend_from_slice(&header);
         archive.extend_from_slice(contents);
         archive.resize(archive.len() + super::padding_for(contents.len() as u64), 0);
+    }
+
+    fn append_link(archive: &mut Vec<u8>, name: &[u8], target: &[u8], kind: u8) {
+        let start = archive.len();
+        append_entry(archive, name, b"", kind, b"");
+        let header = &mut archive[start..start + BLOCK_SIZE];
+        header[157..157 + target.len()].copy_from_slice(target);
+        header[148..156].fill(b' ');
+        let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
+        write_octal(&mut header[148..156], checksum);
     }
 
     fn finish_archive(archive: &mut Vec<u8>) {

@@ -527,7 +527,9 @@ fn copy_decoded(buffer: &mut [u8], output: &mut usize, bytes: &[u8]) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonError, Value};
+    use std::{format, string::ToString};
+
+    use super::{parse_value, JsonError, Value, MAX_DEPTH};
 
     #[test]
     fn validates_and_iterates_nested_json() {
@@ -558,5 +560,198 @@ mod tests {
             .object()
             .unwrap();
         assert_eq!(object.get("a"), Err(JsonError::DuplicateField("a")));
+    }
+
+    #[test]
+    fn decodes_every_simple_escape_and_uppercase_hex() {
+        let value = Value::parse_document(br#""\"\\\/\b\f\n\r\t\u004A\u00AF""#).unwrap();
+        let string = value.string().unwrap();
+        let mut output = [0; 32];
+        assert_eq!(
+            string.decode_into(&mut output).unwrap().as_bytes(),
+            b"\"\\/\x08\x0c\n\r\tJ\xc2\xaf"
+        );
+
+        let positioned_backslash = Value::parse_document(br#""a\\b""#)
+            .unwrap()
+            .string()
+            .unwrap();
+        assert_eq!(
+            positioned_backslash.decode_into(&mut output).unwrap(),
+            "a\\b"
+        );
+    }
+
+    #[test]
+    fn exposes_unescaped_strings_and_checks_decoded_ascii_exactly() {
+        let plain = Value::parse_document(br#""plain""#)
+            .unwrap()
+            .string()
+            .unwrap();
+        assert_eq!(plain.encoded(), "plain");
+        assert_eq!(plain.as_str(), Some("plain"));
+        assert!(plain.decoded_eq_ascii("plain"));
+        assert!(!plain.decoded_eq_ascii("other"));
+        assert!(!plain.decoded_eq_ascii("£"));
+
+        let escaped = Value::parse_document(br#""\u0062""#)
+            .unwrap()
+            .string()
+            .unwrap();
+        assert_eq!(escaped.as_str(), None);
+        assert!(escaped.decoded_eq_ascii("b"));
+        assert!(!escaped.decoded_eq_ascii("a"));
+    }
+
+    #[test]
+    fn rejects_raw_control_characters_and_small_decode_buffers() {
+        assert_eq!(
+            Value::parse_document(b"\"line\nfeed\""),
+            Err(JsonError::InvalidSyntax)
+        );
+
+        let plain = Value::parse_document(br#""hello""#)
+            .unwrap()
+            .string()
+            .unwrap();
+        assert_eq!(
+            plain.decode_into(&mut [0; 4]),
+            Err(JsonError::BufferTooSmall)
+        );
+        let escaped = Value::parse_document(br#""\u263a""#)
+            .unwrap()
+            .string()
+            .unwrap();
+        assert_eq!(
+            escaped.decode_into(&mut [0; 2]),
+            Err(JsonError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn accepts_empty_containers_and_false_literal() {
+        assert_eq!(
+            Value::parse_document(b"{}")
+                .unwrap()
+                .object()
+                .unwrap()
+                .iter()
+                .count(),
+            0
+        );
+        assert_eq!(
+            Value::parse_document(b"[]")
+                .unwrap()
+                .array()
+                .unwrap()
+                .iter()
+                .count(),
+            0
+        );
+        assert!(Value::parse_document(b"false").is_ok());
+    }
+
+    #[test]
+    fn enforces_nesting_at_the_exact_limit() {
+        assert_eq!(parse_value(b"null", 0, MAX_DEPTH), Ok(4));
+        assert_eq!(
+            parse_value(b"null", 0, MAX_DEPTH + 1),
+            Err(JsonError::NestingTooDeep)
+        );
+        assert_eq!(
+            parse_value(b"null", 0, MAX_DEPTH + 2),
+            Err(JsonError::NestingTooDeep)
+        );
+
+        let arrays_at_limit = format!("{}null{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(Value::parse_document(arrays_at_limit.as_bytes()).is_ok());
+        let arrays_too_deep = format!(
+            "{}null{}",
+            "[".repeat(MAX_DEPTH + 1),
+            "]".repeat(MAX_DEPTH + 1)
+        );
+        assert_eq!(
+            Value::parse_document(arrays_too_deep.as_bytes()),
+            Err(JsonError::NestingTooDeep)
+        );
+
+        let objects_at_limit = format!(
+            "{}null{}",
+            "{\"a\":".repeat(MAX_DEPTH),
+            "}".repeat(MAX_DEPTH)
+        );
+        assert!(Value::parse_document(objects_at_limit.as_bytes()).is_ok());
+        let objects_too_deep = format!(
+            "{}null{}",
+            "{\"a\":".repeat(MAX_DEPTH + 1),
+            "}".repeat(MAX_DEPTH + 1)
+        );
+        assert_eq!(
+            Value::parse_document(objects_too_deep.as_bytes()),
+            Err(JsonError::NestingTooDeep)
+        );
+    }
+
+    #[test]
+    fn validates_each_json_number_form() {
+        for number in ["0", "-1", "10", "1.25", "1e2", "1E+2", "1e-2"] {
+            assert!(
+                Value::parse_document(number.as_bytes()).is_ok(),
+                "number={number:?}"
+            );
+        }
+        for number in ["-", "01", "1.", "1e", "1e+", "1e-"] {
+            assert!(
+                Value::parse_document(number.as_bytes()).is_err(),
+                "number={number:?}"
+            );
+        }
+
+        assert_eq!(Value { bytes: b"" }.u64(), Err(JsonError::WrongType));
+        assert_eq!(Value { bytes: b"12x" }.u64(), Err(JsonError::WrongType));
+        assert_eq!(Value { bytes: b"42" }.u64(), Ok(42));
+        assert_eq!(
+            Value {
+                bytes: b"18446744073709551616"
+            }
+            .u64(),
+            Err(JsonError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn string_conversion_checks_both_quotes() {
+        assert_eq!(
+            Value { bytes: b"plain\"" }.string(),
+            Err(JsonError::WrongType)
+        );
+        assert_eq!(
+            Value { bytes: b"\"plain" }.string(),
+            Err(JsonError::WrongType)
+        );
+    }
+
+    #[test]
+    fn formats_every_json_error() {
+        let cases = [
+            (JsonError::InvalidUtf8, "JSON is not UTF-8"),
+            (JsonError::InvalidSyntax, "invalid JSON syntax"),
+            (JsonError::NestingTooDeep, "JSON nesting is too deep"),
+            (JsonError::InvalidEscape, "invalid JSON string escape"),
+            (JsonError::InvalidNumber, "invalid JSON number"),
+            (JsonError::WrongType, "unexpected JSON value type"),
+            (JsonError::MissingField("name"), "missing JSON field name"),
+            (
+                JsonError::DuplicateField("name"),
+                "duplicate JSON field name",
+            ),
+            (
+                JsonError::BufferTooSmall,
+                "JSON string output buffer is too small",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }

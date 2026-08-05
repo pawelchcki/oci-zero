@@ -387,54 +387,18 @@ impl<'a> Decoder<'a> {
                             end,
                         });
                     }
-                    match status {
-                        TINFLStatus::Done => {}
-                        TINFLStatus::NeedsMoreInput => {
-                            return Ok(InternalStep::NeedInput { consumed: position });
-                        }
-                        // Unreachable: `start < len` leaves a free byte, so a full
-                        // output buffer always comes with `written != 0`, handled
-                        // above. Kept as an error rather than a panic so a future
-                        // regression cannot crash on untrusted input.
-                        TINFLStatus::HasMoreOutput => {
-                            debug_assert!(false, "HasMoreOutput with written == 0");
-                            return Err(DecodeError::InvalidDeflateStream);
-                        }
-                        _ => unreachable!(),
+                    if needs_input_without_output(status)? {
+                        return Ok(InternalStep::NeedInput { consumed: position });
                     }
                 }
                 State::Trailer => {
                     let copied =
                         copy_into(&mut self.small, &mut self.small_len, &input[position..]);
                     position += copied;
-                    if self.small_len != TRAILER_SIZE {
+                    if trailer_incomplete(self.small_len) {
                         return Ok(InternalStep::NeedInput { consumed: position });
                     }
-                    let expected_crc = u32::from_le_bytes([
-                        self.small[0],
-                        self.small[1],
-                        self.small[2],
-                        self.small[3],
-                    ]);
-                    let actual_crc = !self.data_crc;
-                    if expected_crc != actual_crc {
-                        return Err(DecodeError::InvalidDataChecksum {
-                            expected: expected_crc,
-                            actual: actual_crc,
-                        });
-                    }
-                    let expected_size = u32::from_le_bytes([
-                        self.small[4],
-                        self.small[5],
-                        self.small[6],
-                        self.small[7],
-                    ]);
-                    if expected_size != self.data_size {
-                        return Err(DecodeError::InvalidDataSize {
-                            expected: expected_size,
-                            actual: self.data_size,
-                        });
-                    }
+                    validate_trailer(&self.small, !self.data_crc, self.data_size)?;
                     self.completed_members += 1;
                     self.small_len = 0;
                     self.state = State::Header;
@@ -499,6 +463,43 @@ impl<'a> Decoder<'a> {
     }
 }
 
+fn needs_input_without_output(status: TINFLStatus) -> Result<bool, DecodeError> {
+    match status {
+        TINFLStatus::Done => Ok(false),
+        TINFLStatus::NeedsMoreInput => Ok(true),
+        // Unreachable while `output_position < history.len()`: a full output
+        // buffer always has non-empty output, handled before this function.
+        TINFLStatus::HasMoreOutput => Err(DecodeError::InvalidDeflateStream),
+        _ => unreachable!(),
+    }
+}
+
+fn trailer_incomplete(length: usize) -> bool {
+    length != TRAILER_SIZE
+}
+
+fn validate_trailer(
+    trailer: &[u8; TRAILER_SIZE],
+    actual_crc: u32,
+    actual_size: u32,
+) -> Result<(), DecodeError> {
+    let expected_crc = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+    if expected_crc != actual_crc {
+        return Err(DecodeError::InvalidDataChecksum {
+            expected: expected_crc,
+            actual: actual_crc,
+        });
+    }
+    let expected_size = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
+    if expected_size != actual_size {
+        return Err(DecodeError::InvalidDataSize {
+            expected: expected_size,
+            actual: actual_size,
+        });
+    }
+    Ok(())
+}
+
 fn copy_into(destination: &mut [u8], filled: &mut usize, input: &[u8]) -> usize {
     let length = input.len().min(destination.len() - *filled);
     destination[*filled..*filled + length].copy_from_slice(&input[..length]);
@@ -534,3 +535,174 @@ const fn crc32_table() -> [u32; 256] {
 }
 
 const CRC32_TABLE: [u32; 256] = crc32_table();
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::string::ToString;
+
+    use super::*;
+
+    fn new_decoder(history: &mut [u8; HISTORY_SIZE]) -> Decoder<'_> {
+        Decoder::new(DecoderBuffers { history }).unwrap()
+    }
+
+    #[test]
+    fn formats_decode_errors() {
+        assert_eq!(
+            DecodeError::InvalidDataChecksum {
+                expected: 0x1234,
+                actual: 0xabcd,
+            }
+            .to_string(),
+            "gzip data checksum mismatch: expected 00001234, got 0000abcd"
+        );
+    }
+
+    #[test]
+    fn finish_requires_a_completed_member_at_a_clean_header_boundary() {
+        let mut history = [0; HISTORY_SIZE];
+        let mut decoder = new_decoder(&mut history);
+
+        assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
+
+        decoder.completed_members = 1;
+        assert_eq!(decoder.finish(), Ok(()));
+
+        decoder.state = State::Deflate;
+        assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
+        decoder.state = State::Header;
+
+        decoder.fixed_len = 1;
+        assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
+        decoder.fixed_len = 0;
+
+        decoder.small_len = 1;
+        assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
+    }
+
+    #[test]
+    fn reset_restores_every_stream_state_field() {
+        let mut history = [0; HISTORY_SIZE];
+        let mut decoder = new_decoder(&mut history);
+        decoder.history.fill(0xff);
+        decoder.state = State::Trailer;
+        decoder.poisoned = true;
+        decoder.completed_members = 1;
+        decoder.fixed_len = 1;
+        decoder.small_len = 1;
+        decoder.flags = 0xff;
+        decoder.extra_remaining = 1;
+        decoder.header_crc = 0;
+        decoder.data_crc = 0;
+        decoder.data_size = 1;
+        decoder.output_position = 1;
+
+        decoder.reset();
+
+        assert!(decoder.history.iter().all(|byte| *byte == 0));
+        assert_eq!(decoder.state, State::Header);
+        assert!(!decoder.poisoned);
+        assert_eq!(decoder.completed_members, 0);
+        assert_eq!(decoder.fixed_len, 0);
+        assert_eq!(decoder.small_len, 0);
+        assert_eq!(decoder.flags, 0);
+        assert_eq!(decoder.extra_remaining, 0);
+        assert_eq!(decoder.header_crc, !0);
+        assert_eq!(decoder.data_crc, !0);
+        assert_eq!(decoder.data_size, 0);
+        assert_eq!(decoder.output_position, 0);
+    }
+
+    #[test]
+    fn rejects_bad_magic_and_reserved_flags_independently() {
+        for header in [
+            [0, 0, 8, 0, 0, 0, 0, 0, 0, 0],
+            [0x1f, 0x8b, 8, 0x20, 0, 0, 0, 0, 0, 0],
+        ] {
+            let mut history = [0; HISTORY_SIZE];
+            assert_eq!(
+                new_decoder(&mut history).decode(&header),
+                Err(DecodeError::InvalidHeader)
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_the_extra_field_flag_exactly() {
+        let mut history = [0; HISTORY_SIZE];
+        let mut decoder = new_decoder(&mut history);
+
+        decoder.flags = 0;
+        assert_eq!(decoder.next_optional_state(), State::StartDeflate);
+        decoder.flags = 0x04;
+        assert_eq!(decoder.next_optional_state(), State::ExtraLength);
+    }
+
+    #[test]
+    fn starts_deflate_from_clean_state() {
+        let mut history = [0; HISTORY_SIZE];
+        let mut decoder = new_decoder(&mut history);
+        decoder.history.fill(0xff);
+        decoder.data_crc = 0;
+        decoder.data_size = 1;
+        decoder.output_position = 1;
+
+        decoder.start_deflate();
+
+        assert!(decoder.history.iter().all(|byte| *byte == 0));
+        assert_eq!(decoder.data_crc, !0);
+        assert_eq!(decoder.data_size, 0);
+        assert_eq!(decoder.output_position, 0);
+        assert_eq!(decoder.state, State::Deflate);
+    }
+
+    #[test]
+    fn classifies_statuses_without_output() {
+        assert_eq!(needs_input_without_output(TINFLStatus::Done), Ok(false));
+        assert_eq!(
+            needs_input_without_output(TINFLStatus::NeedsMoreInput),
+            Ok(true)
+        );
+        assert_eq!(
+            needs_input_without_output(TINFLStatus::HasMoreOutput),
+            Err(DecodeError::InvalidDeflateStream)
+        );
+    }
+
+    #[test]
+    fn validates_trailer_length_checksum_and_size() {
+        assert!(trailer_incomplete(TRAILER_SIZE - 1));
+        assert!(!trailer_incomplete(TRAILER_SIZE));
+
+        let mut trailer = [0; TRAILER_SIZE];
+        trailer[..4].copy_from_slice(&0x1234_u32.to_le_bytes());
+        trailer[4..].copy_from_slice(&56_u32.to_le_bytes());
+        assert_eq!(validate_trailer(&trailer, 0x1234, 56), Ok(()));
+        assert_eq!(
+            validate_trailer(&trailer, 0xabcd, 56),
+            Err(DecodeError::InvalidDataChecksum {
+                expected: 0x1234,
+                actual: 0xabcd,
+            })
+        );
+        assert_eq!(
+            validate_trailer(&trailer, 0x1234, 78),
+            Err(DecodeError::InvalidDataSize {
+                expected: 56,
+                actual: 78,
+            })
+        );
+    }
+
+    #[test]
+    fn copies_into_the_unfilled_destination_suffix() {
+        let mut destination = [1, 0, 0];
+        let mut filled = 1;
+
+        assert_eq!(copy_into(&mut destination, &mut filled, &[2, 3, 4]), 2);
+        assert_eq!(destination, [1, 2, 3]);
+        assert_eq!(filled, 3);
+    }
+}

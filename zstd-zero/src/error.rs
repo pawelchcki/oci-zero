@@ -60,3 +60,78 @@ impl fmt::Display for DecodeError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::string::ToString;
+
+    use super::DecodeError;
+
+    #[test]
+    fn formats_every_decode_error() {
+        let cases = [
+            (DecodeError::DecoderPoisoned, "decoder is poisoned"),
+            (DecodeError::InvalidMagic, "invalid zstd frame magic"),
+            (DecodeError::InvalidFrameHeader, "invalid zstd frame header"),
+            (
+                DecodeError::UnsupportedDictionary { id: 42 },
+                "zstd dictionary 42 is not supported",
+            ),
+            (
+                DecodeError::WindowTooLarge,
+                "zstd window does not fit this platform",
+            ),
+            (
+                DecodeError::HistoryTooSmall {
+                    required: 8,
+                    provided: 3,
+                },
+                "history buffer is too small: need 8 bytes, have 3",
+            ),
+            (
+                DecodeError::BlockScratchTooSmall {
+                    required: 8,
+                    provided: 3,
+                },
+                "block scratch is too small: need 8 bytes, have 3",
+            ),
+            (
+                DecodeError::LiteralScratchTooSmall {
+                    required: 8,
+                    provided: 3,
+                },
+                "literal scratch is too small: need 8 bytes, have 3",
+            ),
+            (DecodeError::InvalidBlock, "invalid zstd block"),
+            (
+                DecodeError::InvalidEntropyTable,
+                "invalid zstd entropy table",
+            ),
+            (DecodeError::InvalidBitstream, "invalid zstd bitstream"),
+            (DecodeError::InvalidOffset, "invalid zstd match offset"),
+            (
+                DecodeError::ChecksumMismatch {
+                    expected: 0x1234,
+                    actual: 0xabcd,
+                },
+                "zstd checksum mismatch: expected 00001234, got 0000abcd",
+            ),
+            (
+                DecodeError::ContentSizeMismatch {
+                    expected: 12,
+                    actual: 34,
+                },
+                "zstd content-size mismatch: expected 12, got 34",
+            ),
+            (DecodeError::UnexpectedEof, "unexpected end of zstd stream"),
+            (
+                DecodeError::ArithmeticOverflow,
+                "zstd size arithmetic overflow",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+}
