@@ -113,7 +113,7 @@ jobs:
             --tag latest \
             --output publish >> "$GITHUB_OUTPUT"
 
-      - uses: aws-actions/configure-aws-credentials@f503a1870408dcf2c35d5c2b8a68e69211042c7d # v5.0.0
+      - uses: aws-actions/configure-aws-credentials@0802eece3e41d56906971d94b32d33e05fc4a14c # v5.0.0
         with:
           role-to-assume: ${{ vars.OCI_REGISTRY_ROLE_ARN }}
           aws-region: ${{ vars.OCI_REGISTRY_REGION }}
