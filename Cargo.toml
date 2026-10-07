@@ -1,6 +1,6 @@
 [package]
 name = "oci-zero"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A no-std, allocation-free streaming core for OCI registries"
@@ -51,7 +51,7 @@ reqwless = { version = "0.14", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", default-features = false }
-zstd-zero = { version = "0.1.0", path = "zstd-zero", optional = true }
+zstd-zero = { version = "0.2.0", path = "zstd-zero", optional = true }
 
 [dev-dependencies]
 ureq = { version = "=2.9.7", default-features = false, features = ["tls"] }
