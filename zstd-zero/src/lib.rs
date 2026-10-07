@@ -410,6 +410,10 @@ impl<'a> Decoder<'a> {
         self.header_len = 0;
         self.block_header_len = 0;
         self.current_header = None;
+        self.reset_frame();
+    }
+
+    fn reset_frame(&mut self) {
         self.frame_output = 0;
         self.pending_len = 0;
         self.offsets = [1, 4, 8];
@@ -595,14 +599,7 @@ impl<'a> Decoder<'a> {
         }
         self.current_header = Some(header);
         self.block_limit = core::cmp::min(window, MAX_BLOCK_SIZE);
-        self.frame_output = 0;
-        self.pending_len = 0;
-        self.offsets = [1, 4, 8];
-        self.checksum = XxHash64::new();
-        self.huffman.reset();
-        self.literal_lengths.reset();
-        self.offsets_table.reset();
-        self.match_lengths.reset();
+        self.reset_frame();
         Ok(())
     }
 
@@ -974,7 +971,7 @@ fn decode_literals(
             }
         };
         ensure_literal_space(regenerated, output.len(), block_limit)?;
-        if kind == 0 {
+        return if kind == 0 {
             let end = header_size
                 .checked_add(regenerated)
                 .ok_or(DecodeError::ArithmeticOverflow)?;
@@ -987,68 +984,66 @@ fn decode_literals(
             let value = *input.get(header_size).ok_or(DecodeError::InvalidBlock)?;
             output[..regenerated].fill(value);
             Ok((regenerated, header_size + 1))
-        }
-    } else {
-        let (regenerated, compressed, streams, header_size): (usize, usize, usize, usize) =
-            match format {
-                0 | 1 => {
-                    if input.len() < 3 {
-                        return Err(DecodeError::InvalidBlock);
-                    }
-                    let combined =
-                        input[0] as u32 | (input[1] as u32) << 8 | (input[2] as u32) << 16;
-                    (
-                        ((combined >> 4) & 0x3ff) as usize,
-                        ((combined >> 14) & 0x3ff) as usize,
-                        if format == 0 { 1 } else { 4 },
-                        3,
-                    )
-                }
-                2 => {
-                    if input.len() < 4 {
-                        return Err(DecodeError::InvalidBlock);
-                    }
-                    let combined = read_u32(input);
-                    (
-                        ((combined >> 4) & 0x3fff) as usize,
-                        ((combined >> 18) & 0x3fff) as usize,
-                        4,
-                        4,
-                    )
-                }
-                _ => {
-                    if input.len() < 5 {
-                        return Err(DecodeError::InvalidBlock);
-                    }
-                    let combined = read_variable_u64(&input[..5]);
-                    (
-                        ((combined >> 4) & 0x3ffff) as usize,
-                        ((combined >> 22) & 0x3ffff) as usize,
-                        4,
-                        5,
-                    )
-                }
-            };
-        ensure_literal_space(regenerated, output.len(), block_limit)?;
-        let end = header_size
-            .checked_add(compressed)
-            .ok_or(DecodeError::ArithmeticOverflow)?;
-        let mut encoded = input
-            .get(header_size..end)
-            .ok_or(DecodeError::InvalidBlock)?;
-        if kind == 2 {
-            let table_size = table.read_description(encoded, scratch)?;
-            encoded = &encoded[table_size..];
-        } else if !table.is_valid() {
-            return Err(DecodeError::InvalidEntropyTable);
-        }
-        if streams == 1 {
-            table.decode(encoded, &mut output[..regenerated], strict)?;
-        } else {
-            table.decode_four(encoded, &mut output[..regenerated], strict)?;
-        }
-        Ok((regenerated, end))
+        };
     }
+    let (regenerated, compressed, streams, header_size): (usize, usize, usize, usize) = match format
+    {
+        0 | 1 => {
+            if input.len() < 3 {
+                return Err(DecodeError::InvalidBlock);
+            }
+            let combined = input[0] as u32 | (input[1] as u32) << 8 | (input[2] as u32) << 16;
+            (
+                ((combined >> 4) & 0x3ff) as usize,
+                ((combined >> 14) & 0x3ff) as usize,
+                if format == 0 { 1 } else { 4 },
+                3,
+            )
+        }
+        2 => {
+            if input.len() < 4 {
+                return Err(DecodeError::InvalidBlock);
+            }
+            let combined = read_u32(input);
+            (
+                ((combined >> 4) & 0x3fff) as usize,
+                ((combined >> 18) & 0x3fff) as usize,
+                4,
+                4,
+            )
+        }
+        _ => {
+            if input.len() < 5 {
+                return Err(DecodeError::InvalidBlock);
+            }
+            let combined = read_variable_u64(&input[..5]);
+            (
+                ((combined >> 4) & 0x3ffff) as usize,
+                ((combined >> 22) & 0x3ffff) as usize,
+                4,
+                5,
+            )
+        }
+    };
+    ensure_literal_space(regenerated, output.len(), block_limit)?;
+    let end = header_size
+        .checked_add(compressed)
+        .ok_or(DecodeError::ArithmeticOverflow)?;
+    let mut encoded = input
+        .get(header_size..end)
+        .ok_or(DecodeError::InvalidBlock)?;
+    if kind == 2 {
+        let table_size = table.read_description(encoded, scratch)?;
+        encoded = &encoded[table_size..];
+    } else if !table.is_valid() {
+        return Err(DecodeError::InvalidEntropyTable);
+    }
+    if streams == 1 {
+        table.decode(encoded, &mut output[..regenerated], strict)?;
+    } else {
+        table.decode_four(encoded, &mut output[..regenerated], strict)?;
+    }
+    Ok((regenerated, end))
 }
 
 fn ensure_literal_space(
@@ -1217,6 +1212,39 @@ mod tests {
     use crate::*;
     use std::vec::Vec;
 
+    struct EntropyBuffers {
+        fse: Vec<FseEntry>,
+        huffman: Vec<HuffmanEntry>,
+        scratch: [i16; FSE_SCRATCH_LEN],
+    }
+
+    impl EntropyBuffers {
+        fn new() -> Self {
+            Self {
+                fse: std::vec![FseEntry::new(); FSE_ENTRIES],
+                huffman: std::vec![HuffmanEntry::new(); HUFFMAN_ENTRIES],
+                scratch: [0; FSE_SCRATCH_LEN],
+            }
+        }
+
+        fn decoder<'a>(
+            &'a mut self,
+            history: &'a mut [u8],
+            block: &'a mut [u8],
+            literals: &'a mut [u8],
+        ) -> Decoder<'a> {
+            Decoder::new(DecoderBuffers {
+                history,
+                block,
+                literals,
+                fse: &mut self.fse,
+                huffman: &mut self.huffman,
+                fse_scratch: &mut self.scratch,
+            })
+            .unwrap()
+        }
+    }
+
     #[test]
     fn parses_sampled_datadog_header() {
         let bytes = [0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x78];
@@ -1244,18 +1272,8 @@ mod tests {
         let mut history = [0u8; 5];
         let mut block = [0u8; 5];
         let mut literals = [0u8; 5];
-        let mut fse_scratch = [0i16; crate::FSE_SCRATCH_LEN];
-        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
-        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            fse_scratch: &mut fse_scratch,
-            fse: &mut fse,
-            huffman: &mut huffman,
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        })
-        .unwrap();
+        let mut entropy = EntropyBuffers::new();
+        let mut decoder = entropy.decoder(&mut history, &mut block, &mut literals);
         let mut input = &frame[..];
         let mut output = [0u8; 5];
         let mut output_len = 0;
@@ -1284,18 +1302,8 @@ mod tests {
         let mut history = [0u8; 5];
         let mut block = [0u8; 5];
         let mut literals = [0u8; 5];
-        let mut fse_scratch = [0i16; crate::FSE_SCRATCH_LEN];
-        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
-        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            fse_scratch: &mut fse_scratch,
-            fse: &mut fse,
-            huffman: &mut huffman,
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        })
-        .unwrap();
+        let mut entropy = EntropyBuffers::new();
+        let mut decoder = entropy.decoder(&mut history, &mut block, &mut literals);
         let mut output = Vec::new();
         for fragment in frame.chunks(2) {
             decoder
@@ -1324,18 +1332,8 @@ mod tests {
         let mut history = [0u8; 10];
         let mut block = [0u8; 1];
         let mut literals = [];
-        let mut fse_scratch = [0i16; crate::FSE_SCRATCH_LEN];
-        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
-        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            fse_scratch: &mut fse_scratch,
-            fse: &mut fse,
-            huffman: &mut huffman,
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        })
-        .unwrap();
+        let mut entropy = EntropyBuffers::new();
+        let mut decoder = entropy.decoder(&mut history, &mut block, &mut literals);
         let mut input = rle.as_slice();
         let mut output = [0u8; 10];
         let mut position = 0;
@@ -1360,18 +1358,8 @@ mod tests {
         let mut history = [];
         let mut block = [];
         let mut literals = [];
-        let mut fse_scratch = [0i16; crate::FSE_SCRATCH_LEN];
-        let mut fse = std::vec![FseEntry::default(); FSE_ENTRIES];
-        let mut huffman = std::vec![HuffmanEntry::default(); HUFFMAN_ENTRIES];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            fse_scratch: &mut fse_scratch,
-            fse: &mut fse,
-            huffman: &mut huffman,
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        })
-        .unwrap();
+        let mut entropy = EntropyBuffers::new();
+        let mut decoder = entropy.decoder(&mut history, &mut block, &mut literals);
         let mut input = empty.as_slice();
         loop {
             let step = decoder.decode(input).unwrap();
