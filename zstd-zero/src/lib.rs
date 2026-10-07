@@ -340,13 +340,9 @@ impl<'a> Decoder<'a> {
             }
             let needs_input = matches!(step, DecodeStep::NeedInput { .. });
             let produced = match step {
-                DecodeStep::Output { bytes, .. } => {
-                    if bytes.is_empty() {
-                        false
-                    } else {
-                        output(bytes).map_err(StreamError::Output)?;
-                        true
-                    }
+                DecodeStep::Output { bytes, .. } if !bytes.is_empty() => {
+                    output(bytes).map_err(StreamError::Output)?;
+                    true
                 }
                 _ => false,
             };
