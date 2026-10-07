@@ -21,14 +21,21 @@ fn decode_with(
     let mut history = vec![0u8; history_size];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::with_options(
         DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
         },
         options,
-    );
+    )
+    .unwrap();
     let mut out = Vec::new();
     let mut input = compressed;
     let mut finished = 0usize;
@@ -181,4 +188,16 @@ fn strict_mode_rejects_what_lenient_mode_tolerates() {
         "expected lenient mode to accept some frames strict mode rejects; \
          the option may no longer have any effect"
     );
+}
+
+/// Fixed regressions from a deterministic Casita mutation campaign (seed
+/// 0xCA517A, libzstd 1.5.7). Lenient decoding used to accept both frames.
+#[test]
+fn rejects_saved_truncated_literal_regressions() {
+    for frame in [
+        include_bytes!("fixtures/wrong-output.zst").as_slice(),
+        include_bytes!("fixtures/accepted-corruption.zst").as_slice(),
+    ] {
+        assert!(decode_zero(frame, 1024).is_err());
+    }
 }

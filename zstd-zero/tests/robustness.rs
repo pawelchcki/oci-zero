@@ -24,11 +24,18 @@ fn every_raw_frame_truncation_is_detected() {
         let mut history = [0u8; 5];
         let mut block = [0u8; 5];
         let mut literals = [0u8; 5];
+        let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+        let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+        let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
+        })
+        .unwrap();
         consume_to_boundary(&mut decoder, &RAW_FRAME[..length]).unwrap();
         assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
     }
@@ -40,11 +47,18 @@ fn reports_exact_caller_buffer_shortages() {
     let mut history = [0u8; 1024];
     let mut block = [0u8; 1];
     let mut literals = [0u8; 1];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .unwrap();
     assert_eq!(
         decoder.decode(&header).unwrap_err(),
         DecodeError::HistoryTooSmall {
@@ -56,11 +70,18 @@ fn reports_exact_caller_buffer_shortages() {
     let mut history = [0u8; 5];
     let mut block = [0u8; 4];
     let mut literals = [0u8; 5];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .unwrap();
     let error = loop {
         match decoder.decode(RAW_FRAME) {
             Ok(DecodeStep::FrameStarted { consumed, .. }) => {
@@ -91,11 +112,18 @@ fn dictionary_and_reserved_headers_are_rejected() {
     let mut history = [];
     let mut block = [];
     let mut literals = [];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .unwrap();
     assert_eq!(
         decoder.decode(&dictionary_frame).unwrap_err(),
         DecodeError::UnsupportedDictionary { id: 13 }
@@ -128,11 +156,18 @@ fn arbitrary_fragmented_inputs_never_panic() {
         let mut history = [0u8; 4096];
         let mut block = [0u8; 4096];
         let mut literals = [0u8; 4096];
+        let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+        let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+        let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
         let mut decoder = Decoder::new(DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
+        })
+        .unwrap();
         let mut position = 0usize;
         while position < length {
             let end = core::cmp::min(position + 1 + case % 17, length);
@@ -159,11 +194,18 @@ fn compressed_frame_reports_literal_scratch_requirement() {
     let mut history = vec![0u8; expected.len()];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = [];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .unwrap();
     let mut input = compressed.as_slice();
     let error = loop {
         match decoder.decode(input) {
@@ -197,11 +239,18 @@ fn mutations_of_a_valid_compressed_frame_never_panic() {
     let mut history = vec![0u8; source.len()];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .unwrap();
 
     for position in (0..compressed.len()).step_by(257) {
         compressed[position] ^= 0x40;

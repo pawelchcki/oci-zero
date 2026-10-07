@@ -357,11 +357,18 @@ pub async fn scan_layer_stream(
                 let mut history = vec![0; window];
                 let mut block = vec![0; MAX_BLOCK_SIZE];
                 let mut literals = vec![0; MAX_BLOCK_SIZE];
+                let mut fse_scratch = [0i16; zstd::FSE_SCRATCH_LEN];
+                let mut fse = vec![zstd::FseEntry::default(); zstd::FSE_ENTRIES];
+                let mut huffman = vec![zstd::HuffmanEntry::default(); zstd::HUFFMAN_ENTRIES];
                 let decoder = Decoder::zstd(ZstdBuffers {
                     history: &mut history,
                     block: &mut block,
                     literals: &mut literals,
-                });
+                    fse_scratch: &mut fse_scratch,
+                    fse: &mut fse,
+                    huffman: &mut huffman,
+                })
+                .map_err(display_web)?;
                 drive_layer_stream(
                     decoder,
                     Some(prefix),
@@ -682,11 +689,18 @@ fn with_decoder<T>(
             let mut history = vec![0; window];
             let mut block = vec![0; MAX_BLOCK_SIZE];
             let mut literals = vec![0; MAX_BLOCK_SIZE];
+            let mut fse_scratch = [0i16; zstd::FSE_SCRATCH_LEN];
+            let mut fse = vec![zstd::FseEntry::default(); zstd::FSE_ENTRIES];
+            let mut huffman = vec![zstd::HuffmanEntry::default(); zstd::HUFFMAN_ENTRIES];
             run(Decoder::zstd(ZstdBuffers {
                 history: &mut history,
                 block: &mut block,
                 literals: &mut literals,
-            }))
+                fse_scratch: &mut fse_scratch,
+                fse: &mut fse,
+                huffman: &mut huffman,
+            })
+            .map_err(display_web)?)
         }
     }
 }

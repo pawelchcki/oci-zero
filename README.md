@@ -141,7 +141,7 @@ cargo run --release -p zstd-zero --example decode_layer
 The decoder lives in the separately publishable `zstd-zero` workspace crate. It
 is `no_std`, dependency-free, and allocation-free; this host-side smoke test
 uses heap-backed caller buffers for its 32 MiB history window and two 128 KiB
-scratch areas.
+scratch areas, plus caller-owned entropy tables.
 
 Extract one regular file from that layer while it is downloaded and decoded:
 
@@ -153,8 +153,8 @@ cargo run --release --features zstd --example extract_file -- \
 The tar state machine keeps one 512-byte header and writes matching contents
 directly to standard output. Layer bytes are never buffered in full. The fixed
 32 MiB allocation is required by this particular Zstandard frame's declared
-history window; the decoder also reuses two 128 KiB work areas and a 16 KiB
-network input buffer. The host-side HTTP adapter may perform its own small
+history window; the decoder also reuses two 128 KiB work areas, caller-owned
+entropy tables, and a 16 KiB network input buffer. The host-side HTTP adapter may perform its own small
 allocations. Because standard output is not transactional, consumers must wait
 for a successful process exit before trusting or acting on the streamed bytes.
 
@@ -176,7 +176,7 @@ The network path uses `oci-zero`'s optional reqwless and MbedTLS adapters; it
 does not collect the response body. MbedTLS's internal C
 allocations come from a fixed 4 MiB static bump arena, while the Rust program
 has no global allocator. The Zstandard decoder's 32 MiB history, two 128 KiB
-work areas, 16 KiB input area, and the HTTP/TLS buffers are also bounded and
+work areas, entropy tables, 16 KiB input area, and the HTTP/TLS buffers are also bounded and
 statically or stack allocated. This proof-of-concept is deliberately narrow:
 it verifies the known Datadog layer's compressed and decompressed sizes and
 digests, trusts only the embedded DigiCert Global Root G2, resolves DNS through
