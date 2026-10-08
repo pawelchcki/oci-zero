@@ -2,6 +2,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+// Keep the hosted adapter on the same core instance as STORE when Cargo builds
+// both panic=abort binaries and panic=unwind integration tests.
+pub use oci_zero;
+
 // The hosted cdylib needs a panic runtime. Bare-metal builds use only the rlib
 // and remain independent of std, just like the router and store themselves.
 #[cfg(not(target_os = "none"))]

@@ -369,6 +369,7 @@ jobs:
             sleep 1
           done
           node tests/smoke.mjs http://127.0.0.1:8787
+          OCI_ZERO_DEMO_REGISTRY_URL=http://127.0.0.1:8787 cargo test -p oci-zero-registry-demo --features local --test roundtrip -- --include-ignored
           cd ../../web
           OCI_ZERO_DEMO_REGISTRY_URL=http://127.0.0.1:8787 npx playwright test tests/registry-demo.spec.mjs
       - name: Upload registry demo failure evidence

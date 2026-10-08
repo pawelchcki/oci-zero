@@ -5,8 +5,7 @@ use std::{
     time::Duration,
 };
 
-use oci_zero::server::serve;
-use oci_zero_registry_demo::STORE;
+use oci_zero_registry_demo::{oci_zero::server::serve, STORE};
 
 fn handle(mut stream: TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;

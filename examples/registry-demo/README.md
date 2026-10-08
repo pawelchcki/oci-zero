@@ -112,6 +112,14 @@ access. Add your own access policy when adapting this to private data.
 
 ```sh
 cargo test -p oci-zero --test server
+cargo test -p oci-zero-registry-demo --features local --test roundtrip
 node --test examples/registry-demo/tests/*.test.mjs
 cargo check -p oci-zero-registry-demo --lib --target riscv32imc-unknown-none-elf
 ```
+
+The round-trip tests start the Rust server on an ephemeral loopback port and use
+`RequestPlanner`, `pull`, digest verification, and `VerifiedEntryExtractor` to
+download image layers and recover embedded files. They cover both index
+architectures, repository files, generated files, and corrupted downloads.
+Set `OCI_ZERO_DEMO_REGISTRY_URL` and add `-- --include-ignored` to also run the
+same Rust client against a running Worker; CI exercises this with the local Worker.
