@@ -1,0 +1,46 @@
+{
+  "exclude": [
+    "target/**",
+    "**/target/**",
+    "vendor/**",
+    "**/vendor/**",
+    "**/generated/**",
+    "web/pkg/**",
+    "web/node_modules/**",
+    "web/dist/**",
+    "web/playwright-report/**",
+    "web/test-results/**"
+  ],
+  "tests": [
+    "tests/**",
+    "**/tests/**",
+    "**/tests.rs",
+    "benches/**",
+    "**/benches/**",
+    "testdata/**",
+    "**/testdata/**",
+    "fixtures/**",
+    "**/fixtures/**",
+    "fuzz/**",
+    "**/fuzz/**",
+    "*_test.*",
+    "test_*.*",
+    "**/*_test.*",
+    "**/test_*.*"
+  ],
+  "tooling": [
+    "tools/**",
+    "examples/**",
+    "**/examples/**",
+    "no-std-extract/**",
+    "web/**",
+    "bench/**",
+    "scripts/**",
+    ".github/**",
+    ".runnerless-ci.ts"
+  ],
+  "extensions": {
+    ".mjs": "javascript"
+  },
+  "paths": []
+}
