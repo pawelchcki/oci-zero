@@ -91,8 +91,10 @@ jobs:
         with:
           shared-key: ci-onboarding
           cache-bin: false
-      - run: cargo clippy -p oci-zero-matter-qr --all-targets --all-features -- -D warnings
+      # Build complete dependency artifacts first; Clippy can reuse these,
+      # whereas its metadata-only artifacts cannot satisfy a subsequent test.
       - run: cargo test -p oci-zero-matter-qr --all-features
+      - run: cargo clippy -p oci-zero-matter-qr --all-targets --all-features -- -D warnings
       - run: cargo doc -p oci-zero-matter-qr --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
