@@ -33,7 +33,7 @@ const PAYLOAD_MODES: [PayloadMode; 8] = [
     PayloadMode::PeriodicMutations,
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct FrameConfig {
     level: i32,
     strategy: zstd::zstd_safe::Strategy,
@@ -58,22 +58,8 @@ impl fmt::Display for CaseContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "case={} seed={:#018x} size={} mode={:?} level={} strategy={:?} checksum={} \
-             content_size={} window_log={} target_compressed_block_size={:?} write_fragment=1..={} \
-             flush_every={:?} decode_fragment=1..={}",
-            self.number,
-            self.seed,
-            self.size,
-            self.mode,
-            self.config.level,
-            self.config.strategy,
-            self.config.checksum,
-            self.config.content_size,
-            self.config.window_log,
-            self.config.target_compressed_block_size,
-            self.config.max_write_fragment,
-            self.config.flush_every,
-            self.config.max_decode_fragment,
+            "case={} seed={:#018x} size={} mode={:?} config={:?}",
+            self.number, self.seed, self.size, self.mode, self.config,
         )
     }
 }
@@ -277,21 +263,18 @@ fn encode(payload: &[u8], context: &CaseContext) -> Vec<u8> {
     let config = context.config;
     let mut encoder = zstd::stream::Encoder::new(Vec::new(), config.level)
         .unwrap_or_else(|error| panic!("{context}: create encoder: {error}"));
-    encoder
-        .include_checksum(config.checksum)
-        .unwrap_or_else(|error| panic!("{context}: set checksum: {error}"));
-    encoder
-        .include_contentsize(config.content_size)
-        .unwrap_or_else(|error| panic!("{context}: set content-size flag: {error}"));
-    encoder
-        .window_log(config.window_log)
-        .unwrap_or_else(|error| panic!("{context}: set window log: {error}"));
-    encoder
-        .set_parameter(zstd::zstd_safe::CParameter::Strategy(config.strategy))
-        .unwrap_or_else(|error| panic!("{context}: set compression strategy: {error}"));
-    encoder
-        .set_target_cblock_size(config.target_compressed_block_size)
-        .unwrap_or_else(|error| panic!("{context}: set target block size: {error}"));
+    use zstd::zstd_safe::CParameter;
+    for parameter in [
+        CParameter::ChecksumFlag(config.checksum),
+        CParameter::ContentSizeFlag(config.content_size),
+        CParameter::WindowLog(config.window_log),
+        CParameter::Strategy(config.strategy),
+        CParameter::TargetCBlockSize(config.target_compressed_block_size.unwrap_or(0)),
+    ] {
+        encoder
+            .set_parameter(parameter)
+            .unwrap_or_else(|error| panic!("{context}: set {parameter:?}: {error}"));
+    }
     encoder
         .set_pledged_src_size(Some(payload.len() as u64))
         .unwrap_or_else(|error| panic!("{context}: pledge source size: {error}"));
@@ -337,6 +320,24 @@ struct DecodeResult {
     finished_frames: usize,
 }
 
+impl DecodeResult {
+    fn record(&mut self, step: DecodeStep<'_>, context: &impl fmt::Display) -> bool {
+        match step {
+            DecodeStep::NeedInput { .. } => return true,
+            DecodeStep::FrameStarted { .. } => self.started_frames += 1,
+            DecodeStep::FrameFinished { .. } => self.finished_frames += 1,
+            DecodeStep::Output { bytes, .. } => {
+                assert!(
+                    !bytes.is_empty(),
+                    "{context}: decoder returned empty output"
+                );
+                self.output.extend_from_slice(bytes);
+            }
+        }
+        false
+    }
+}
+
 fn decode_zero(
     compressed: &[u8],
     fragment_seed: u64,
@@ -377,24 +378,13 @@ fn decode_zero(
             );
             consumed_total += consumed;
             input = &input[consumed..];
-            match step {
-                DecodeStep::NeedInput { .. } => {
-                    assert!(
-                        input.is_empty(),
-                        "{context}: NeedInput left {} bytes unconsumed",
-                        input.len()
-                    );
-                    break;
-                }
-                DecodeStep::FrameStarted { .. } => result.started_frames += 1,
-                DecodeStep::Output { bytes, .. } => {
-                    assert!(
-                        !bytes.is_empty(),
-                        "{context}: decoder returned empty output"
-                    );
-                    result.output.extend_from_slice(bytes);
-                }
-                DecodeStep::FrameFinished { .. } => result.finished_frames += 1,
+            if result.record(step, context) {
+                assert!(
+                    input.is_empty(),
+                    "{context}: NeedInput left {} bytes unconsumed",
+                    input.len()
+                );
+                break;
             }
         }
         position = end;
@@ -402,30 +392,12 @@ fn decode_zero(
     }
 
     loop {
-        match decoder
+        let step = decoder
             .decode(&[])
-            .unwrap_or_else(|error| panic!("{context}: final zstd-zero decode: {error:?}"))
-        {
-            DecodeStep::NeedInput { consumed } => {
-                assert_eq!(consumed, 0, "{context}: empty input consumed bytes");
-                break;
-            }
-            DecodeStep::FrameStarted { consumed, .. } => {
-                assert_eq!(consumed, 0, "{context}: empty input consumed bytes");
-                result.started_frames += 1;
-            }
-            DecodeStep::Output { consumed, bytes } => {
-                assert_eq!(consumed, 0, "{context}: empty input consumed bytes");
-                assert!(
-                    !bytes.is_empty(),
-                    "{context}: decoder returned empty output"
-                );
-                result.output.extend_from_slice(bytes);
-            }
-            DecodeStep::FrameFinished { consumed, .. } => {
-                assert_eq!(consumed, 0, "{context}: empty input consumed bytes");
-                result.finished_frames += 1;
-            }
+            .unwrap_or_else(|error| panic!("{context}: final zstd-zero decode: {error:?}"));
+        assert_eq!(step.consumed(), 0, "{context}: empty input consumed bytes");
+        if result.record(step, context) {
+            break;
         }
     }
     assert_eq!(

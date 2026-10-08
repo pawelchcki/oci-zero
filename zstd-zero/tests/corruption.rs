@@ -8,7 +8,7 @@
 
 mod support;
 
-use zstd_zero::{DecodeStep, Decoder, DecoderOptions, MAX_BLOCK_SIZE};
+use zstd_zero::{Decoder, DecoderOptions, MAX_BLOCK_SIZE};
 
 /// Decode a complete stream. `Ok` only if the decoder accepted it cleanly.
 fn decode_zero(compressed: &[u8], history_size: usize) -> Result<Vec<u8>, String> {
@@ -23,33 +23,16 @@ fn decode_with(
     let mut buffers = support::Buffers::new(history_size, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
     let mut decoder = Decoder::with_options(buffers.as_decoder_buffers(), options).unwrap();
     let mut out = Vec::new();
-    let mut input = compressed;
-    let mut finished = 0usize;
-    loop {
-        let step = decoder
-            .decode(input)
-            .map_err(|error| format!("{error:?}"))?;
-        let consumed = step.consumed();
-        if consumed > input.len() {
-            return Err("consumed more than was available".into());
-        }
-        if let DecodeStep::Output { bytes, .. } = &step {
-            out.extend_from_slice(bytes);
-        }
-        if matches!(step, DecodeStep::FrameFinished { .. }) {
-            finished += 1;
-        }
-        input = &input[consumed..];
-        if matches!(step, DecodeStep::NeedInput { .. }) {
-            if !input.is_empty() {
-                return Err("stalled without consuming its input".into());
-            }
-            break;
-        }
-    }
-    if finished == 0 {
-        return Err("no frame finished".into());
-    }
+    let mut collect = |bytes: &[u8]| {
+        out.extend_from_slice(bytes);
+        Ok::<_, core::convert::Infallible>(())
+    };
+    decoder
+        .push(compressed, &mut collect)
+        .map_err(|error| format!("{error:?}"))?;
+    decoder
+        .finish_with(collect)
+        .map_err(|error| format!("{error:?}"))?;
     Ok(out)
 }
 
