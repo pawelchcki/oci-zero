@@ -11,7 +11,7 @@ host's pinned scorer, model and settings, and a shared cache; GPU workers
 score only uncached contents. No application build or source script runs as
 part of the analysis.
 
-`.ci-toolkit.yml` consumes the six report artifacts from the
+`.runnerless-ci.ts` consumes the six report artifacts from the
 `Complexity comparison` status published by BuildBuddy. It publishes the
 full reports and upserts one bounded comment on each open pull request.
 Reports are retained for 14 days, with five default-branch sets kept.
@@ -41,11 +41,13 @@ llm-cc rules explain src/layer.rs gzip-zero/tests/invariants.rs web/app.js web/t
 
 ## Enable reporting
 
-The BuildBuddy and ci-toolkit GitHub apps must have access to
+The BuildBuddy and Runnerless GitHub integrations must have access to
 `pawelchcki/oci-zero`. Register the repository with the BuildBuddy group
 that can use the `linux-amd64-kvm` pool and its `bazzite-host` resource.
 The shared host must have `/var/lib/llm-cc/bin/llm-cc-coordinate` installed;
 configure a read-only `GITHUB_TOKEN` BuildBuddy secret for GitHub discovery.
+The Runnerless host must authorize the `complexity` publisher for this
+repository in `ARTIFACT_PROGRAM_PUBLISHERS`.
 
 Merge the publication policy and rules onto `main` before expecting
 pull-request comments: the publisher reads policy from the target commit,
@@ -54,7 +56,9 @@ therefore cannot publish its own comment using its new policy. Its merge
 starts the first repository baseline run.
 
 The upstream [consumer guide](https://github.com/pawelchcki/llm-cc/blob/main/tools/comparison/consumer/README.md)
-documents host setup, credentials and the report artifacts.
+documents host setup, credentials and the report artifacts. The publisher
+uses the same [Runnerless workflow](https://github.com/pawelchcki/llm-cc/blob/main/.runnerless-ci.ts)
+as llm-cc itself, including cleanup of merged pull-request artifacts.
 
 ## Local branch comparison
 

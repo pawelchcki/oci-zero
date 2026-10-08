@@ -1,4 +1,4 @@
-# Shared Bazzite coordinator; the action name is matched by .ci-toolkit.yml.
+# Shared Bazzite coordinator; the action name is matched by .runnerless-ci.ts.
 actions:
   - name: "Complexity comparison"
     self_hosted: true
