@@ -174,20 +174,20 @@ impl<'a> Table<'a> {
         for probability in probabilities.iter_mut() {
             *probability = match *probability {
                 -1 => 1,
-                value if value > 0 => value,
-                _ => 0,
+                value => value.max(0),
             };
         }
         let next = probabilities;
         for entry in &mut self.entries[..table_size] {
             let symbol = entry.symbol as usize;
-            let state =
-                u16::try_from(next[symbol]).map_err(|_| DecodeError::InvalidEntropyTable)?;
+            let state = next[symbol] as u16;
             if state == 0 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            next[symbol] =
-                i16::try_from(state + 1).map_err(|_| DecodeError::InvalidEntropyTable)?;
+            // The validated probabilities sum to at most 512. A symbol's
+            // counter starts at its count and advances once per table slot,
+            // so even the final increment is at most 1024 and fits in i16.
+            next[symbol] += 1;
             let floor_log = (u16::BITS - 1 - state.leading_zeros()) as u8;
             let bits = table_log - floor_log;
             entry.bits = bits;

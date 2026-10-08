@@ -18,9 +18,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Incremental artifacts are ineffective across clean CI checkouts. Keep this
+# scoped to CI so local development retains Cargo's incremental builds.
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  quality:
-    name: Stable Rust
+  lint:
+    name: Rust lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,10 +34,13 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-lint
+          cache-bin: false
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --exclude oci-zero-no-std-extract --all-targets --all-features -- -D warnings
-      - run: cargo clippy --release -p oci-zero-no-std-extract -- -D warnings
-      - run: cargo test --workspace --exclude oci-zero-no-std-extract --all-features
+      - run: cargo clippy --workspace --exclude oci-zero-no-std-extract --exclude oci-zero-matter-qr --all-targets --all-features -- -D warnings
       - name: WebAssembly and Chrome extension checks
         run: |
           cargo check -p oci-zero-web --target wasm32-unknown-unknown
@@ -50,9 +58,66 @@ jobs:
           sh -n tools/build-firmware-artifact.sh
           # bash, not sh: the walk over a nested index recurses and uses arrays.
           bash -n tools/publish-static-registry.sh
-      # The QR code committed to examples/esp32c3-ota/README.md is generated from
-      # rs-matter's commissioning constants. Regenerate and diff, so changing them
-      # fails the build until the README is regenerated too.
+
+  unit:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-unit
+          cache-bin: false
+      - run: cargo test --workspace --exclude oci-zero-no-std-extract --exclude oci-zero-matter-qr --all-features
+
+  onboarding-lint:
+    name: Matter onboarding lint
+    runs-on: ubuntu-latest
+    # Clippy and rustdoc share dependency metadata; keep them on one runner.
+    env:
+      CARGO_PROFILE_DEV_PANIC: unwind
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-onboarding-lint
+          cache-bin: false
+      - run: cargo clippy -p oci-zero-matter-qr --all-targets --all-features -- -D warnings
+      - run: cargo doc -p oci-zero-matter-qr --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  onboarding:
+    name: Matter onboarding
+    runs-on: ubuntu-latest
+    # This hosted tool can use the same dependency artifacts for tests and
+    # generation. The workspace's panic=abort otherwise forces a second build.
+    env:
+      CARGO_PROFILE_DEV_PANIC: unwind
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-onboarding
+          cache-bin: false
+      - run: cargo test -p oci-zero-matter-qr --all-features
       - name: Committed Matter onboarding data is current
         run: |
           cargo run -q -p oci-zero-matter-qr
@@ -60,6 +125,21 @@ jobs:
             examples/esp32c3-ota/onboarding-qr.txt \
             examples/esp32c3-ota/onboarding.txt
 
+  native:
+    name: Native TLS smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-native
+          cache-bin: false
+      - run: cargo clippy --release -p oci-zero-no-std-extract -- -D warnings
       - name: Public OCI artifact metadata smoke tests
         run: cargo test --release --test metadata_smoke inspects_public_registry_fixtures -- --ignored --nocapture
       - name: no_std MbedTLS streamed extraction smoke test
@@ -68,6 +148,20 @@ jobs:
           target/release/oci-zero-no-std-extract \
             'https://install.datadoghq.com/v2/agent-package/blobs/sha256:bc219703080f03ad836d51bf7f72cc3ced34f5ba440a49f450d6a5dea98ceff4' \
             application_monitoring.yaml.example > /dev/null
+
+  conformance:
+    name: Zstd conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-conformance
+          cache-bin: false
       - name: Official zstd decodeCorpus conformance
         run: |
           curl -fsSLo /tmp/zstd-1.5.7.tar.gz https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
@@ -75,13 +169,60 @@ jobs:
           tar -xzf /tmp/zstd-1.5.7.tar.gz -C /tmp
           make -C /tmp/zstd-1.5.7/tests decodecorpus
           DECODECORPUS=/tmp/zstd-1.5.7/tests/decodecorpus cargo test -p zstd-zero --test conformance decodes_official_decodecorpus_frames -- --ignored
-      - run: cargo doc --workspace --exclude oci-zero-no-std-extract --no-deps --all-features
+
+  docs:
+    name: Rust documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-docs
+          cache-bin: false
+      - run: cargo doc --workspace --exclude oci-zero-no-std-extract --exclude oci-zero-matter-qr --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  package:
+    name: Package verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: ci-package
+          cache-bin: false
       # Package together so Cargo can resolve unpublished workspace versions
       # from the packaged crates when verifying a release PR.
       - name: Package published crates
         run: cargo package -p gzip-zero -p zstd-zero -p oci-zero
+
+  # Preserve the required check name and fail if any parallel Rust job fails.
+  quality:
+    name: Stable Rust
+    if: always()
+    needs: [lint, unit, onboarding-lint, onboarding, native, conformance, docs, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All Rust checks passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          failed = [name for name, job in results.items() if job["result"] != "success"]
+          if failed:
+              raise SystemExit("Rust checks did not succeed: " + ", ".join(failed))
+          PYCODE
 
   supply-chain:
     name: Advisories
@@ -117,8 +258,20 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: wasm-release
+          cache-bin: false
+          cache-directories: ~/.cache/.wasm-pack
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: wasm-pack@0.15.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Build WebAssembly package
         run: web/build.sh
       - run: npm ci
@@ -165,5 +318,10 @@ jobs:
         with:
           toolchain: "1.75.0"
           targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: msrv-thumb
+          cache-bin: false
       - run: cargo check -p oci-zero -p gzip-zero -p zstd-zero --lib --no-default-features --target thumbv7em-none-eabi
       - run: cargo check -p oci-zero --lib --no-default-features --features gzip,zstd --target thumbv7em-none-eabi
