@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - web/**
+      # web/build.sh resolves dependencies through the root workspace lockfile.
+      - Cargo.lock
       - .github/workflows/pages.yml
   workflow_dispatch:
 
