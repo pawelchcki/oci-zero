@@ -76,7 +76,7 @@ Wraps the allocation-free core of `miniz_oxide` with incremental gzip header,
 trailer, checksum, size, and concatenated-member handling. The caller supplies
 the 32 KiB DEFLATE history buffer; input may be split at arbitrary byte
 boundaries and output is returned as borrowed slices. See
-[gzip-zero/README.md](gzip-zero/README.md).
+[gzip-zero/README.md](https://github.com/pawelchcki/oci-zero/blob/main/gzip-zero/README.md).
 
 ## `zstd-zero`
 
@@ -90,7 +90,7 @@ history buffer (at least the frame's declared window), two block scratch
 buffers of up to 128 KiB, and the entropy-table buffers. Dictionary, legacy, and
 magicless frames are not supported. Output can be observed before a final
 content checksum fails, so callers that need atomic behaviour must use a
-transactional sink. See [zstd-zero/README.md](zstd-zero/README.md) for the
+transactional sink. See [zstd-zero/README.md](https://github.com/pawelchcki/oci-zero/blob/main/zstd-zero/README.md) for the
 buffer requirements and a usage example.
 
 ## Compatibility
@@ -155,7 +155,7 @@ before trusting or acting on the extracted bytes. This layer declares a 32 MiB
 history window, which the example allocates on the heap; the host-side HTTP
 adapter may also make small allocations.
 
-[`no-std-extract`](no-std-extract) does the same as a hosted `no_std` binary
+[`no-std-extract`](https://github.com/pawelchcki/oci-zero/tree/main/no-std-extract) does the same as a hosted `no_std` binary
 with no Rust allocator, using the `reqwless`, `tls`, and `zstd` features (Rust
 1.91):
 
@@ -176,26 +176,26 @@ against the pinned blob.
 
 These are not published crates:
 
-- [`web`](web/README.md) — a WebAssembly browser page and Chrome extension for
+- [`web`](https://github.com/pawelchcki/oci-zero/blob/main/web/README.md) — a WebAssembly browser page and Chrome extension for
   browsing registries, layers, and merged filesystems. A hosted build is at
   <https://pawelchcki.github.io/oci-zero/>; as an ordinary web page it can only
   reach registries that send CORS headers.
-- [`bench`](bench/README.md) — a Linux harness that measures the end-to-end
+- [`bench`](https://github.com/pawelchcki/oci-zero/blob/main/bench/README.md) — a Linux harness that measures the end-to-end
   memory, CPU, and binary-size overhead of `no-std-extract`.
-- [`examples/esp32c3-ota`](examples/esp32c3-ota/README.md) — ESP32-C3 firmware
+- [`examples/esp32c3-ota`](https://github.com/pawelchcki/oci-zero/blob/main/examples/esp32c3-ota/README.md) — ESP32-C3 firmware
   intended to update itself from an OCI registry; the update path is not
   implemented yet.
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for the PR title convention, which is enforced in CI
+See [AGENTS.md](https://github.com/pawelchcki/oci-zero/blob/main/AGENTS.md) for the PR title convention, which is enforced in CI
 because it drives version bumps and changelogs, and for how releases are cut.
 
 ## License
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/pawelchcki/oci-zero/blob/main/LICENSE-APACHE)), or
+- MIT License ([LICENSE-MIT](https://github.com/pawelchcki/oci-zero/blob/main/LICENSE-MIT))
 
 at your option.
