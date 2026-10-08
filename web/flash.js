@@ -77,6 +77,9 @@ async function guard(action) {
 }
 
 async function openArtifact(file) {
+  state.artifact = null;
+  $("artifact-panel").classList.add("hidden");
+  $("flash").disabled = true;
   setStatus(`Reading ${file.name} (${formatBytes(file.size)}).`);
   if (file.size > MAX_ARTIFACT_BYTES) {
     throw new Error(`${file.name} is larger than the ${formatBytes(MAX_ARTIFACT_BYTES)} limit`);

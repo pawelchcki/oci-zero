@@ -74,6 +74,17 @@ test("rejects a layer whose compressed payload is damaged", async ({ page }) => 
   await expect(page.locator("#flash")).toBeDisabled();
 });
 
+test("clears a previously verified artifact when the replacement is invalid", async ({ page }) => {
+  await open(page, firmwareLayout({ version: VERSION }));
+  await expect(page.locator("#flash")).toBeEnabled();
+
+  await open(page, firmwareLayout({ version: "invalid-replacement", corruptLayer: "payload" }));
+
+  await expect(page.locator("#status")).toHaveClass(/error/);
+  await expect(page.locator("#artifact-panel")).toBeHidden();
+  await expect(page.locator("#flash")).toBeDisabled();
+});
+
 test("rejects an artifact whose manifest does not match the descriptor in index.json", async ({ page }) => {
   const fixture = firmwareLayout({ version: VERSION });
   // Rename the manifest blob to a digest it does not have: index.json still

@@ -159,14 +159,44 @@ fn hex(byte: u8) -> Result<u8, DigestError> {
 
 #[cfg(test)]
 mod tests {
-    use std::string::ToString;
+    use std::{format, string::ToString};
 
-    use super::{Digest, Verifier, VerifyError};
+    use super::{Digest, DigestError, Verifier, VerifyError};
 
     #[test]
     fn parses_and_formats_sha256() {
         let text = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert_eq!(Digest::parse(text).unwrap().to_string(), text);
+    }
+
+    #[test]
+    fn reports_digest_parse_errors() {
+        assert_eq!(
+            Digest::parse(
+                "sha512:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            ),
+            Err(DigestError::UnsupportedAlgorithm)
+        );
+        assert_eq!(Digest::parse("sha256:00"), Err(DigestError::InvalidLength));
+        assert_eq!(
+            Digest::parse(
+                "sha256:ga7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            ),
+            Err(DigestError::InvalidEncoding)
+        );
+
+        assert_eq!(
+            DigestError::UnsupportedAlgorithm.to_string(),
+            "unsupported digest algorithm"
+        );
+        assert_eq!(
+            DigestError::InvalidLength.to_string(),
+            "invalid SHA-256 digest length"
+        );
+        assert_eq!(
+            DigestError::InvalidEncoding.to_string(),
+            "invalid SHA-256 digest encoding"
+        );
     }
 
     #[test]
@@ -176,8 +206,11 @@ mod tests {
         )
         .unwrap();
         let mut verifier = Verifier::new(digest, 3);
+        assert_eq!(verifier.actual_size(), 0);
         verifier.update(b"a").unwrap();
+        assert_eq!(verifier.actual_size(), 1);
         verifier.update(b"bc").unwrap();
+        assert_eq!(verifier.actual_size(), 3);
         assert_eq!(verifier.finish(), Ok(()));
 
         let mut verifier = Verifier::new(digest, 4);
@@ -186,5 +219,28 @@ mod tests {
             verifier.finish(),
             Err(VerifyError::SizeMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn formats_verification_errors() {
+        let expected = Digest::from_bytes([0x11; 32]);
+        let actual = Digest::from_bytes([0x22; 32]);
+
+        assert_eq!(
+            VerifyError::SizeOverflow.to_string(),
+            "content size overflow"
+        );
+        assert_eq!(
+            VerifyError::SizeMismatch {
+                expected: 7,
+                actual: 3,
+            }
+            .to_string(),
+            "size mismatch: expected 7, got 3"
+        );
+        assert_eq!(
+            VerifyError::DigestMismatch { expected, actual }.to_string(),
+            format!("digest mismatch: expected {expected}, got {actual}")
+        );
     }
 }
