@@ -152,6 +152,12 @@ impl fmt::Display for BufferTooSmall {
     }
 }
 
+impl From<fmt::Error> for BufferTooSmall {
+    fn from(_: fmt::Error) -> Self {
+        Self
+    }
+}
+
 /// Serve GET/HEAD and OPTIONS from a read-only registry. Pagination accepts
 /// nonnegative `n` and a percent-encoded `last` cursor (maximum 256 decoded bytes).
 /// `n=0` returns an empty page without a continuation link.
@@ -200,15 +206,9 @@ pub fn serve<'a>(
             len: 0,
         };
         if let Some(repo) = repository {
-            output.write_str("{\"name\":").map_err(|_| BufferTooSmall)?;
-            json_string(&mut output, repo).map_err(|_| BufferTooSmall)?;
-            output
-                .write_str(",\"tags\":[")
-                .map_err(|_| BufferTooSmall)?;
+            write!(output, r#"{{"name":"{repo}","tags":["#)?;
         } else {
-            output
-                .write_str("{\"repositories\":[")
-                .map_err(|_| BufferTooSmall)?;
+            output.write_str(r#"{"repositories":["#)?;
         }
         let mut previous = last;
         let mut count = 0;
@@ -220,15 +220,13 @@ pub fn serve<'a>(
             }
             // Selection avoids allocation and imposes no sorting requirement on
             // small embedded stores. Large stores can implement indexed access.
-            let mut smallest = None;
-            let mut index = 0;
-            while let Some(name) = name_at(index) {
-                if name > previous && smallest.map_or(true, |best| name < best) {
-                    smallest = Some(name);
-                }
-                index += 1;
-            }
-            let Some(name) = smallest else { break };
+            let Some(name) = (0..)
+                .map_while(&name_at)
+                .filter(|name| *name > previous)
+                .min()
+            else {
+                break;
+            };
             if count == n {
                 next = Some(NextLink {
                     path,
@@ -238,14 +236,15 @@ pub fn serve<'a>(
                 break;
             }
             if count != 0 {
-                output.write_str(",").map_err(|_| BufferTooSmall)?;
+                output.write_str(",")?;
             }
-            json_string(&mut output, name).map_err(|_| BufferTooSmall)?;
+            // Store names follow OCI grammar: ASCII with no JSON escapes.
+            write!(output, "\"{name}\"")?;
             previous = name;
             emitted = Some(name);
             count += 1;
         }
-        output.write_str("]}").map_err(|_| BufferTooSmall)?;
+        output.write_str("]}")?;
         let length = output.len;
         let mut result = response(200, &scratch[..length], "application/json", None, head);
         result.next = next;
@@ -257,40 +256,35 @@ pub fn serve<'a>(
     let Some((repo, operation)) = prefix.rsplit_once('/') else {
         return Ok(error(404, "NAME_UNKNOWN", head));
     };
-    if operation == "manifests" {
-        if !store.contains_repository(repo) {
-            return Ok(error(404, "NAME_UNKNOWN", head));
-        }
-        return Ok(match store.manifest(repo, reference) {
-            Some(content) => response(
-                200,
-                content.bytes,
-                content.media_type,
-                Some(content.digest),
-                head,
-            ),
-            None => error(404, "MANIFEST_UNKNOWN", head),
-        });
+    if !store.contains_repository(repo) {
+        return Ok(error(404, "NAME_UNKNOWN", head));
     }
-    if operation == "blobs" {
-        if !store.contains_repository(repo) {
-            return Ok(error(404, "NAME_UNKNOWN", head));
+    let (content, missing) = match operation {
+        "manifests" => (store.manifest(repo, reference), "MANIFEST_UNKNOWN"),
+        "blobs" => {
+            let Ok(digest) = Digest::parse(reference) else {
+                return Ok(error(400, "DIGEST_INVALID", head));
+            };
+            (
+                store.blob(repo, digest).map(|content| Content {
+                    media_type: "application/octet-stream",
+                    ..content
+                }),
+                "BLOB_UNKNOWN",
+            )
         }
-        let Ok(digest) = Digest::parse(reference) else {
-            return Ok(error(400, "DIGEST_INVALID", head));
-        };
-        return Ok(match store.blob(repo, digest) {
-            Some(content) => response(
-                200,
-                content.bytes,
-                "application/octet-stream",
-                Some(content.digest),
-                head,
-            ),
-            None => error(404, "BLOB_UNKNOWN", head),
-        });
-    }
-    Ok(error(404, "NAME_UNKNOWN", head))
+        _ => return Ok(error(404, "NAME_UNKNOWN", head)),
+    };
+    Ok(match content {
+        Some(content) => response(
+            200,
+            content.bytes,
+            content.media_type,
+            Some(content.digest),
+            head,
+        ),
+        None => error(404, missing, head),
+    })
 }
 
 fn response<'a>(
@@ -324,31 +318,24 @@ fn error(status: u16, code: &str, head: bool) -> Response<'static> {
 }
 
 fn pagination<'a>(query: &str, cursor: &'a mut [u8]) -> Option<(usize, &'a str)> {
-    let mut n = usize::MAX;
-    let mut last = "";
-    let mut seen_n = false;
-    let mut seen_last = false;
+    let mut n = None;
+    let mut last = None;
     for parameter in query.split('&').filter(|item| !item.is_empty()) {
         let (key, value) = parameter.split_once('=').unwrap_or((parameter, ""));
         match key {
             "n" => {
-                if seen_n || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
                     return None;
                 }
-                seen_n = true;
-                n = value.parse().ok()?;
-            }
-            "last" => {
-                if seen_last {
+                if n.replace(value.parse().ok()?).is_some() {
                     return None;
                 }
-                seen_last = true;
-                last = value;
             }
+            "last" if last.replace(value).is_some() => return None,
             _ => {}
         }
     }
-    let mut bytes = last.bytes();
+    let mut bytes = last.unwrap_or("").bytes();
     let mut len = 0;
     while let Some(byte) = bytes.next() {
         let decoded = if byte == b'%' {
@@ -363,7 +350,10 @@ fn pagination<'a>(query: &str, cursor: &'a mut [u8]) -> Option<(usize, &'a str)>
         *cursor.get_mut(len)? = decoded;
         len += 1;
     }
-    Some((n, core::str::from_utf8(&cursor[..len]).ok()?))
+    Some((
+        n.unwrap_or(usize::MAX),
+        core::str::from_utf8(&cursor[..len]).ok()?,
+    ))
 }
 
 struct Output<'a> {
@@ -381,17 +371,4 @@ impl Write for Output<'_> {
         self.len = end;
         Ok(())
     }
-}
-
-fn json_string(output: &mut impl Write, value: &str) -> fmt::Result {
-    output.write_char('"')?;
-    for ch in value.chars() {
-        match ch {
-            '"' => output.write_str("\\\"")?,
-            '\\' => output.write_str("\\\\")?,
-            '\u{0}'..='\u{1f}' => write!(output, "\\u{:04x}", ch as u32)?,
-            _ => output.write_char(ch)?,
-        }
-    }
-    output.write_char('"')
 }

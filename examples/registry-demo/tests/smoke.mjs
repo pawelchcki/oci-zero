@@ -1,4 +1,5 @@
-// Exercise the real HTTP transport, independent of Node/Worker implementation.
+// Check HTTP metadata and pagination. Rust roundtrips cover graph traversal,
+// platform selection, layer verification, and extracted file contents.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
@@ -65,34 +66,14 @@ async function payload(repo, kind, reference, descriptor) {
   return { bytes, actual };
 }
 
-const visited = new Set();
-async function manifest(repo, reference, descriptor) {
-  const { bytes, actual } = await payload(repo, "manifests", reference, descriptor);
-  const value = JSON.parse(new TextDecoder().decode(bytes));
-  if (visited.has(`${repo}@${actual}`)) return actual;
-  visited.add(`${repo}@${actual}`);
-  if (value.manifests) {
-    for (const child of value.manifests) await manifest(repo, child.digest, child);
-  } else {
-    const config = await payload(repo, "blobs", value.config.digest, value.config);
-    const rootfs = JSON.parse(new TextDecoder().decode(config.bytes)).rootfs;
-    for (const [index, layer] of value.layers.entries()) {
-      const decoded = await payload(repo, "blobs", layer.digest, layer);
-      if (rootfs) assert.equal(digest(decoded.bytes), rootfs.diff_ids[index]);
-      // The fixtures are uncompressed tar archives with a canonical ending.
-      assert.equal(decoded.bytes.length % 512, 0);
-      assert.ok(decoded.bytes.slice(-1024).every((byte) => byte === 0));
-    }
-  }
-  return actual;
+const latest = await payload("demo/garden", "manifests", "latest");
+const image = JSON.parse(new TextDecoder().decode(latest.bytes));
+for (const descriptor of [image.config, ...image.layers]) {
+  await payload("demo/garden", "blobs", descriptor.digest, descriptor);
 }
-
-const latest = await manifest("demo/garden", "latest");
-assert.equal(await manifest("demo/garden", "v2"), latest);
-assert.notEqual(await manifest("demo/garden", "v1"), latest);
-await manifest("demo/garden", "multi");
-await manifest("demo/source", "latest");
+assert.equal((await payload("demo/garden", "manifests", "v2")).actual, latest.actual);
+assert.notEqual((await payload("demo/garden", "manifests", "v1")).actual, latest.actual);
 const missing = await get("/v2/demo/garden/manifests/missing");
 assert.equal(missing.status, 404);
 assert.equal((await missing.json()).errors[0].code, "MANIFEST_UNKNOWN");
-console.log(`Verified registry probes, pagination, CORS, HEAD, ${visited.size} manifests, and all referenced blobs at ${base}`);
+console.log(`Verified registry probes, pagination, CORS, GET/HEAD metadata, and tag aliases at ${base}`);

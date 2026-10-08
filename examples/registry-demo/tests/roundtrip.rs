@@ -10,8 +10,8 @@ use std::{
 };
 
 use oci_zero::{
-    digest::Verifier,
-    layer::{Decoder, VerifiedDecoder, VerifiedEntryExtractor},
+    digest::{Digest, Verifier, VerifyError},
+    layer::{Decoder, EntryLayerError, VerifiedDecoder, VerifiedEntryExtractor},
     metadata::Descriptor,
     pull::{
         self, BlobAction, BlobKind, BlobSink, Fetcher, ManifestReference, PullBuffers, PullVisitor,
@@ -52,11 +52,9 @@ struct HttpFetcher<'a> {
     planner: RequestPlanner<'a>,
     agent: ureq::Agent,
     corrupt_layer: bool,
-    manifests: usize,
-    blobs: usize,
 }
 impl HttpFetcher<'_> {
-    fn get(&self, request: Request<'_>) -> Result<ureq::Response, String> {
+    fn get(&self, request: Request<'_>) -> ureq::Response {
         let target = request.target;
         self.agent
             .get(&format!(
@@ -65,108 +63,81 @@ impl HttpFetcher<'_> {
             ))
             .set("Accept", request.accept)
             .call()
-            .map_err(|e| e.to_string())
+            .unwrap()
     }
 }
 impl Fetcher for HttpFetcher<'_> {
-    type Error = String;
+    type Error = VerifyError;
 
     async fn manifest(
         &mut self,
         reference: ManifestReference<'_>,
         destination: &mut [u8],
-    ) -> Result<usize, String> {
+    ) -> Result<usize, VerifyError> {
         let mut path = [0; 512];
         let request = match reference {
             ManifestReference::Tag(_) => self.planner.manifest(&mut path),
             ManifestReference::Digest(digest) => self.planner.manifest_by_digest(digest, &mut path),
         }
-        .map_err(|e| format!("{e:?}"))?;
-        let response = self.get(request)?;
-        let advertised = oci_zero::digest::Digest::parse(
-            response
-                .header("Docker-Content-Digest")
-                .ok_or("missing digest")?,
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        .unwrap();
+        let response = self.get(request);
+        let advertised = Digest::parse(response.header("Docker-Content-Digest").unwrap()).unwrap();
         let expected = match reference {
             ManifestReference::Digest(digest) => digest,
             _ => advertised,
         };
-        if advertised != expected {
-            return Err("manifest header mismatch".into());
-        }
-        let mut reader = response.into_reader();
-        let mut length = 0;
-        loop {
-            let n = reader
-                .read(&mut destination[length..])
-                .map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            length += n;
-            if length == destination.len() {
-                let mut excess = [0];
-                if reader.read(&mut excess).map_err(|e| e.to_string())? != 0 {
-                    return Err("manifest too large".into());
-                }
-                break;
-            }
-        }
+        assert_eq!(advertised, expected, "manifest header mismatch");
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(destination.len() as u64 + 1)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert!(bytes.len() <= destination.len(), "manifest too large");
+        destination[..bytes.len()].copy_from_slice(&bytes);
         let mut verifier = Verifier::digest_only(expected);
-        verifier
-            .update(&destination[..length])
-            .map_err(|e| format!("{e:?}"))?;
-        verifier.finish().map_err(|e| format!("{e:?}"))?;
-        self.manifests += 1;
-        Ok(length)
+        verifier.update(&bytes)?;
+        verifier.finish()?;
+        Ok(bytes.len())
     }
 
     async fn blob<S: BlobSink>(
         &mut self,
         descriptor: Descriptor<'_>,
         sink: &mut S,
-    ) -> Result<(), String> {
+    ) -> Result<(), VerifyError> {
         let digest = descriptor.digest();
         let mut path = [0; 512];
         let request = self
             .planner
             .blob(digest, "application/octet-stream", &mut path)
-            .map_err(|e| format!("{e:?}"))?;
-        let response = self.get(request)?;
-        if response.header("Docker-Content-Digest") != Some(digest.to_string().as_str()) {
-            return Err("blob header mismatch".into());
-        }
+            .unwrap();
+        let response = self.get(request);
+        assert_eq!(
+            response.header("Docker-Content-Digest"),
+            Some(digest.to_string().as_str())
+        );
         let mut verifier = Verifier::new(digest, descriptor.size());
         let mut reader = response.into_reader();
         // Force boundaries inside tar headers, file data, padding, and UTF-8.
         let mut chunk = [0; 37];
-        let mut corrupted = false;
+        let corrupt = self.corrupt_layer
+            && descriptor.media_type().as_str() == Some("application/vnd.oci.image.layer.v1.tar");
         let mut offset = 0;
         loop {
-            let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
+            let n = reader.read(&mut chunk).unwrap();
             if n == 0 {
                 break;
             }
-            if self.corrupt_layer
-                && !corrupted
-                && offset >= 512
-                && descriptor.media_type().as_str()
-                    == Some("application/vnd.oci.image.layer.v1.tar")
-            {
-                chunk[0] ^= 1;
-                corrupted = true;
+            if corrupt && (offset..offset + n).contains(&512) {
+                chunk[512 - offset] ^= 1;
             }
-            verifier.update(&chunk[..n]).map_err(|e| format!("{e:?}"))?;
+            verifier.update(&chunk[..n])?;
             offset += n;
             sink.chunk(&chunk[..n]);
-            if sink.cancelled() {
-                return Err("cancelled".into());
-            }
+            assert!(!sink.cancelled(), "unexpected visitor failure");
         }
-        verifier.finish().map_err(|e| format!("{e:?}"))?;
-        self.blobs += 1;
+        verifier.finish()?;
         Ok(())
     }
 }
@@ -181,19 +152,16 @@ struct Extract {
     layers: usize,
 }
 impl PullVisitor for Extract {
-    type Error = String;
-    fn select_manifest(&mut self, descriptor: Descriptor<'_>) -> Result<Selection, String> {
-        let platform = descriptor
-            .platform()
-            .map_err(|e| format!("{e:?}"))?
-            .unwrap();
+    type Error = EntryLayerError<Infallible>;
+    fn select_manifest(&mut self, descriptor: Descriptor<'_>) -> Result<Selection, Self::Error> {
+        let platform = descriptor.platform().unwrap().unwrap();
         Ok(if self.architecture == platform.architecture().as_str() {
             Selection::Pull
         } else {
             Selection::Skip
         })
     }
-    fn manifest(&mut self, _: oci_zero::metadata::ImageManifest<'_>) -> Result<(), String> {
+    fn manifest(&mut self, _: oci_zero::metadata::ImageManifest<'_>) -> Result<(), Self::Error> {
         self.manifests += 1;
         Ok(())
     }
@@ -201,7 +169,7 @@ impl PullVisitor for Extract {
         &mut self,
         kind: BlobKind,
         descriptor: Descriptor<'_>,
-    ) -> Result<BlobAction, String> {
+    ) -> Result<BlobAction, Self::Error> {
         if let BlobKind::Layer { diff_id } = kind {
             let digest = descriptor.digest();
             let size = descriptor.size();
@@ -214,22 +182,17 @@ impl PullVisitor for Extract {
         }
         Ok(BlobAction::Fetch)
     }
-    fn blob_data(&mut self, kind: BlobKind, bytes: &[u8]) -> Result<(), String> {
-        if matches!(kind, BlobKind::Layer { .. }) {
-            self.extractor
-                .as_mut()
-                .unwrap()
-                .push(bytes, |data| {
-                    self.current.extend_from_slice(data);
-                    Ok::<_, Infallible>(())
-                })
-                .map_err(|e| format!("{e:?}"))?;
+    fn blob_data(&mut self, _: BlobKind, bytes: &[u8]) -> Result<(), Self::Error> {
+        if let Some(extractor) = &mut self.extractor {
+            extractor.push(bytes, |data| {
+                self.current.extend_from_slice(data);
+                Ok::<_, Infallible>(())
+            })?;
         }
         Ok(())
     }
-    fn end_blob(&mut self, kind: BlobKind) -> Result<(), String> {
-        if matches!(kind, BlobKind::Layer { .. }) {
-            let mut extractor = self.extractor.take().unwrap();
+    fn end_blob(&mut self, _: BlobKind) -> Result<(), Self::Error> {
+        if let Some(mut extractor) = self.extractor.take() {
             let finished = extractor.finish(|data| {
                 self.current.extend_from_slice(data);
                 Ok::<_, Infallible>(())
@@ -239,10 +202,10 @@ impl PullVisitor for Extract {
                 | Err(oci_zero::layer::EntryLayerError::Finish(
                     oci_zero::tar::FinishError::NotFound,
                 )) => {}
-                Err(error) => return Err(format!("{error:?}")),
+                Err(error) => return Err(error),
             }
             if extractor.found() {
-                self.files.push(self.current.clone());
+                self.files.push(std::mem::take(&mut self.current));
             }
             self.layers += 1;
         }
@@ -268,7 +231,7 @@ fn download(
     target: &'static [u8],
     architecture: Option<&'static str>,
     corrupt: bool,
-) -> Result<Extract, String> {
+) -> Result<Extract, pull::PullError<VerifyError, EntryLayerError<Infallible>>> {
     let authority = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))
@@ -288,8 +251,6 @@ fn download(
             .timeout(std::time::Duration::from_secs(10))
             .build(),
         corrupt_layer: corrupt,
-        manifests: 0,
-        blobs: 0,
     };
     let mut visitor = Extract {
         target,
@@ -312,13 +273,7 @@ fn download(
             config: &mut config,
         },
         &mut visitor,
-    ))
-    .map_err(|e| format!("{e:?}"))?;
-    assert_eq!(
-        fetcher.manifests,
-        visitor.manifests + usize::from(architecture.is_some())
-    );
-    assert_eq!(fetcher.blobs, visitor.layers + visitor.manifests);
+    ))?;
     Ok(visitor)
 }
 
@@ -381,7 +336,13 @@ fn rust_client_rejects_corrupted_download() {
     let error = download(&origin, "demo/garden", "v1", b"hello.txt", None, true)
         .err()
         .unwrap();
-    assert!(error.contains("DigestMismatch"), "{error}");
+    assert!(
+        matches!(
+            error,
+            pull::PullError::Fetch(VerifyError::DigestMismatch { .. })
+        ),
+        "{error:?}"
+    );
 }
 #[test]
 #[ignore = "requires a running Worker in OCI_ZERO_DEMO_REGISTRY_URL"]

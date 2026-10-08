@@ -35,7 +35,12 @@ impl Builder {
         let content = Content::new(bytes, media_type);
         fs::write(self.out.join(name), bytes).unwrap();
         self.source.push_str(&format!(
-            "static {name}: Content<'static> = Content {{ bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{name}\")), media_type: {media_type:?}, digest: Digest::from_bytes({:?}) }};\n",
+            r#"static {name}: Content<'static> = Content {{
+    bytes: include_bytes!(concat!(env!("OUT_DIR"), "/{name}")),
+    media_type: {media_type:?},
+    digest: Digest::from_bytes({:?}),
+}};
+"#,
             content.digest.as_bytes()
         ));
         json!({"mediaType": media_type, "digest": content.digest.to_string(), "size": bytes.len()})
