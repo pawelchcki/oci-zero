@@ -63,6 +63,10 @@ jobs:
   unit:
     name: Rust tests
     runs-on: ubuntu-latest
+    # The demo's cdylib and rlib share an output name. Match the test harness's
+    # unwind strategy so hosted binaries cannot overwrite its dependencies.
+    env:
+      CARGO_PROFILE_DEV_PANIC: unwind
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
