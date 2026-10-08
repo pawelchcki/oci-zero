@@ -45,6 +45,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
         with:
           toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: differential-${{ matrix.crate }}
+          cache-bin: false
       - name: Cross-check ${{ matrix.crate }} against the reference decoder
         env:
           CASES: ${{ inputs.cases || '25000' }}
