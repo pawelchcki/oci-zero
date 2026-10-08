@@ -151,6 +151,10 @@ sha256_hex() {
     fi
 }
 
+# A trailing slash makes the symlink test dereference the final component.
+while [ "$output" != / ] && [ "${output%/}" != "$output" ]; do
+    output=${output%/}
+done
 blobs="$output/blobs/sha256"
 if [ -L "$output" ]; then
     echo "refusing to replace symlink output path: $output" >&2

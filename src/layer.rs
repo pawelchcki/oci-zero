@@ -880,11 +880,18 @@ mod tests {
         let mut history = [0; 1024];
         let mut block = [0; 1];
         let mut literals = [];
+        let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+        let mut fse = [zstd_zero::FseEntry::new(); zstd_zero::FSE_ENTRIES];
+        let mut huffman = [zstd_zero::HuffmanEntry::new(); zstd_zero::HUFFMAN_ENTRIES];
         let decoder = Decoder::zstd(zstd_zero::DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
+        })
+        .unwrap();
         let mut decoder = VerifiedDecoder::new(decoder, compressed, encoded.len() as u64, diff_id);
         let mut output = std::vec::Vec::new();
 
@@ -912,11 +919,18 @@ mod tests {
         let mut history = [0; 1];
         let mut block = [0; 1];
         let mut literals = [0; 1];
+        let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+        let mut fse = [zstd_zero::FseEntry::new(); zstd_zero::FSE_ENTRIES];
+        let mut huffman = [zstd_zero::HuffmanEntry::new(); zstd_zero::HUFFMAN_ENTRIES];
         let mut decoder = Decoder::zstd(zstd_zero::DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
+        })
+        .unwrap();
         decoder.decode(&[0x28]).unwrap();
         assert!(decoder.finish().is_err());
     }

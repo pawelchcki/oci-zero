@@ -44,3 +44,29 @@ done
 
 test -f "$work/layout/index.json"
 test -f "$work/layout/oci-layout"
+
+printf 'keep layout' > "$work/layout/sentinel"
+ln -s "$work/layout" "$work/layout-link"
+for _suffix in '' / ///; do
+    if "$repository/tools/build-firmware-artifact.sh" \
+        --image "$work/firmware.bin:0x10000" \
+        --version test \
+        --output "$work/layout-link$_suffix" \
+        > "$work/stdout" 2> "$work/stderr"; then
+        echo "builder followed a symlink to an existing layout" >&2
+        exit 1
+    fi
+    test -L "$work/layout-link"
+    test "$(cat "$work/layout/sentinel")" = "keep layout"
+    test -f "$work/layout/index.json"
+    test -f "$work/layout/oci-layout"
+    grep -q "symlink output path" "$work/stderr"
+done
+
+"$repository/tools/build-firmware-artifact.sh" \
+    --image "$work/firmware.bin:0x10000" \
+    --version test \
+    --output "$work/layout///" \
+    > "$work/stdout" 2> "$work/stderr"
+test -f "$work/layout/index.json"
+test -f "$work/layout/oci-layout"
