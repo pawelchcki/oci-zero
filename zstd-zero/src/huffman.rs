@@ -3,34 +3,53 @@ use crate::fse::Table as FseTable;
 use crate::DecodeError;
 
 const MAX_BITS: u8 = 11;
-const TABLE_SIZE: usize = 1 << MAX_BITS;
 
+/// An initialized entropy-table slot; the decoder manages its contents.
 #[derive(Clone, Copy, Debug, Default)]
-struct Entry {
+pub struct Entry {
     symbol: u8,
     bits: u8,
 }
 
-pub(crate) struct Table {
-    entries: [Entry; TABLE_SIZE],
+impl Entry {
+    /// Create an empty slot, including for statically allocated workspaces.
+    pub const fn new() -> Self {
+        Self { symbol: 0, bits: 0 }
+    }
+}
+
+pub(crate) struct Table<'a> {
+    entries: &'a mut [Entry],
+    scratch: FseTable<'a>,
     table_bits: u8,
     valid: bool,
 }
 
-impl Table {
-    pub(crate) const fn new() -> Self {
+impl<'a> Table<'a> {
+    pub(crate) fn new(entries: &'a mut [Entry], scratch: FseTable<'a>) -> Self {
         Self {
-            entries: [Entry { symbol: 0, bits: 0 }; TABLE_SIZE],
+            entries,
+            scratch,
             table_bits: 0,
             valid: false,
         }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.table_bits = 0;
+        self.valid = false;
+        self.scratch.reset();
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         self.valid
     }
 
-    pub(crate) fn read_description(&mut self, input: &[u8]) -> Result<usize, DecodeError> {
+    pub(crate) fn read_description(
+        &mut self,
+        input: &[u8],
+        fse_scratch: &mut [i16],
+    ) -> Result<usize, DecodeError> {
         let header = *input.first().ok_or(DecodeError::InvalidEntropyTable)?;
         let mut weights = [0u8; 256];
         let (weight_count, consumed) = if header < 128 {
@@ -38,7 +57,12 @@ impl Table {
             if compressed_size == 0 || input.len() < 1 + compressed_size {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            let count = decode_compressed_weights(&input[1..1 + compressed_size], &mut weights)?;
+            let count = decode_compressed_weights(
+                &input[1..1 + compressed_size],
+                &mut weights,
+                &mut self.scratch,
+                fse_scratch,
+            )?;
             (count, 1 + compressed_size)
         } else {
             let count = header as usize - 127;
@@ -76,16 +100,16 @@ impl Table {
             if entry.bits == 0 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            if strict {
+            let consumed = if strict {
                 // A short read must fail here. Clamping to the bits that remain would
                 // drive `remaining` to exactly 0, making the end-of-stream check below
                 // vacuous, and every remaining literal would then be decoded from an
                 // all-zero peek — silently emitting `entries[0]` instead of erroring.
-                bits.consume(entry.bits)?;
+                entry.bits
             } else {
-                let consumed = core::cmp::min(entry.bits as usize, bits.remaining()) as u8;
-                bits.consume(consumed)?;
-            }
+                core::cmp::min(entry.bits as usize, bits.remaining()) as u8
+            };
+            bits.consume(consumed)?;
             *byte = entry.symbol;
         }
         if bits.remaining() != 0 {
@@ -108,21 +132,12 @@ impl Table {
             u16::from_le_bytes([input[2], input[3]]) as usize,
             u16::from_le_bytes([input[4], input[5]]) as usize,
         ];
-        let starts = [
-            6,
-            6usize
-                .checked_add(sizes[0])
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-            6usize
-                .checked_add(sizes[0])
-                .and_then(|value| value.checked_add(sizes[1]))
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-            6usize
-                .checked_add(sizes[0])
-                .and_then(|value| value.checked_add(sizes[1]))
-                .and_then(|value| value.checked_add(sizes[2]))
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-        ];
+        let mut starts = [6usize; 4];
+        for (stream, size) in sizes.iter().enumerate() {
+            starts[stream + 1] = starts[stream]
+                .checked_add(*size)
+                .ok_or(DecodeError::ArithmeticOverflow)?;
+        }
         if starts[3] > input.len() {
             return Err(DecodeError::InvalidBitstream);
         }
@@ -221,9 +236,14 @@ impl Table {
     }
 }
 
-fn decode_compressed_weights(input: &[u8], output: &mut [u8; 256]) -> Result<usize, DecodeError> {
-    let mut table = FseTable::new();
-    let description_size = table.read_description(input, 12, 6)?;
+fn decode_compressed_weights(
+    input: &[u8],
+    output: &mut [u8; 256],
+    table: &mut FseTable<'_>,
+    scratch: &mut [i16],
+) -> Result<usize, DecodeError> {
+    table.reset();
+    let description_size = table.read_description(input, 12, 6, scratch)?;
     if description_size >= input.len() {
         return Err(DecodeError::InvalidEntropyTable);
     }
@@ -246,20 +266,23 @@ fn decode_compressed_weights(input: &[u8], output: &mut [u8; 256]) -> Result<usi
             return Ok(count + 1);
         }
         table.update(&mut first, &mut bits)?;
+        core::mem::swap(&mut first, &mut second);
+    }
+}
 
-        if count >= 255 {
-            return Err(DecodeError::InvalidEntropyTable);
-        }
-        output[count] = table.symbol(second)?;
-        count += 1;
-        let entry = table.entry(second)?;
-        if bits.remaining() < entry.bits as usize {
-            if count >= 255 {
-                return Err(DecodeError::InvalidEntropyTable);
-            }
-            output[count] = table.symbol(first)?;
-            return Ok(count + 1);
-        }
-        table.update(&mut second, &mut bits)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_literal_symbol_is_rejected() {
+        let mut entries = std::vec![Entry::new(); crate::HUFFMAN_ENTRIES];
+        let mut scratch = std::vec![crate::FseEntry::new(); 512];
+        let mut table = Table::new(&mut entries, FseTable::new(&mut scratch));
+        table.build(&[1]).unwrap();
+        let mut output = [0; 1];
+        assert!(table.decode(&[1], &mut output, true).is_err());
+        assert!(table.decode(&[2], &mut output, true).is_ok());
+        assert_eq!(output, [0]);
     }
 }

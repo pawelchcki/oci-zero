@@ -7,7 +7,9 @@ use core::panic::PanicInfo;
 use core::slice;
 
 use embedded_io_async::Read;
-use oci_zero::compression::zstd::{DecoderBuffers, MAX_BLOCK_SIZE};
+use oci_zero::compression::zstd::{
+    DecoderBuffers, FseEntry, HuffmanEntry, FSE_ENTRIES, HUFFMAN_ENTRIES, MAX_BLOCK_SIZE,
+};
 use oci_zero::digest::Digest;
 use oci_zero::layer::{
     Decoder, EntryLayerError, LayerError, VerifiedDecoder, VerifiedEntryExtractor,
@@ -61,6 +63,9 @@ struct WorkBuffers {
     history: [u8; HISTORY_CAPACITY],
     block: [u8; MAX_BLOCK_SIZE],
     literals: [u8; MAX_BLOCK_SIZE],
+    fse_scratch: [i16; oci_zero::compression::zstd::FSE_SCRATCH_LEN],
+    fse: [FseEntry; FSE_ENTRIES],
+    huffman: [HuffmanEntry; HUFFMAN_ENTRIES],
 }
 
 struct StaticBuffers(UnsafeCell<WorkBuffers>);
@@ -73,6 +78,9 @@ static BUFFERS: StaticBuffers = StaticBuffers(UnsafeCell::new(WorkBuffers {
     history: [0; HISTORY_CAPACITY],
     block: [0; MAX_BLOCK_SIZE],
     literals: [0; MAX_BLOCK_SIZE],
+    fse_scratch: [0; oci_zero::compression::zstd::FSE_SCRATCH_LEN],
+    fse: [FseEntry::new(); FSE_ENTRIES],
+    huffman: [HuffmanEntry::new(); HUFFMAN_ENTRIES],
 }));
 
 #[derive(Clone, Copy)]
@@ -266,7 +274,11 @@ pub(crate) async fn extract_reader<R: Read>(
         history: &mut buffers.history[..fixture.history_size],
         block: &mut buffers.block,
         literals: &mut buffers.literals,
-    });
+        fse_scratch: &mut buffers.fse_scratch,
+        fse: &mut buffers.fse,
+        huffman: &mut buffers.huffman,
+    })
+    .map_err(|_| Failure::Decode)?;
     let decoder = VerifiedDecoder::new(
         decoder,
         fixture.compressed_digest,

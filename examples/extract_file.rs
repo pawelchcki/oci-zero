@@ -31,16 +31,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut reader = response.into_reader();
 
     // These are the only large layer-processing allocations. The frame itself
-    // declares a 32 MiB history window; the other two buffers are reusable
-    // 128 KiB decoder work areas.
+    // declares a 32 MiB history window; block/literal scratch and entropy
+    // tables are reusable caller-owned work areas.
     let mut history = vec![0u8; HISTORY_SIZE];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; oci_zero::compression::zstd::FSE_SCRATCH_LEN];
+    let mut fse = vec![
+        oci_zero::compression::zstd::FseEntry::default();
+        oci_zero::compression::zstd::FSE_ENTRIES
+    ];
+    let mut huffman = vec![
+        oci_zero::compression::zstd::HuffmanEntry::default();
+        oci_zero::compression::zstd::HUFFMAN_ENTRIES
+    ];
     let decoder = Decoder::zstd(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .map_err(invalid_data)?;
     let decoder = VerifiedDecoder::new(
         decoder,
         Digest::parse(COMPRESSED_SHA256).map_err(invalid_data)?,

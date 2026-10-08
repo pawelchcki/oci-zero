@@ -69,8 +69,10 @@ impl<'a> Decoder<'a> {
     }
 
     #[cfg(feature = "zstd")]
-    pub fn zstd(buffers: zstd_zero::DecoderBuffers<'a>) -> Self {
-        Self::Zstd(zstd_zero::Decoder::new(buffers))
+    pub fn zstd(buffers: zstd_zero::DecoderBuffers<'a>) -> Result<Self, LayerFormatError> {
+        Ok(Self::Zstd(
+            zstd_zero::Decoder::new(buffers).map_err(LayerFormatError::Zstd)?,
+        ))
     }
 
     pub fn decode<'decoder>(
@@ -835,11 +837,18 @@ mod tests {
         let mut history = [0; 5];
         let mut block = [0; 5];
         let mut literals = [0; 5];
+        let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+        let mut fse = [zstd_zero::FseEntry::new(); zstd_zero::FSE_ENTRIES];
+        let mut huffman = [zstd_zero::HuffmanEntry::new(); zstd_zero::HUFFMAN_ENTRIES];
         let decoder = Decoder::zstd(zstd_zero::DecoderBuffers {
             history: &mut history,
             block: &mut block,
             literals: &mut literals,
-        });
+            fse_scratch: &mut fse_scratch,
+            fse: &mut fse,
+            huffman: &mut huffman,
+        })
+        .unwrap();
         let mut decoder = VerifiedDecoder::new(decoder, compressed, ENCODED.len() as u64, diff_id);
         let mut output = [0; 5];
         let mut length = 0;

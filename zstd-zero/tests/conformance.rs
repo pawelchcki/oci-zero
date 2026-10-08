@@ -1,51 +1,26 @@
 use std::io::Write;
 use std::process::Command;
 
-use zstd_zero::{DecodeStep, Decoder, DecoderBuffers, MAX_BLOCK_SIZE};
+mod support;
+
+use zstd_zero::{Decoder, MAX_BLOCK_SIZE};
 
 fn decode_all(compressed: &[u8], chunk_size: usize) -> Vec<u8> {
     decode_with_history(compressed, chunk_size, 64 * 1024 * 1024)
 }
 
 fn decode_with_history(compressed: &[u8], chunk_size: usize, history_size: usize) -> Vec<u8> {
-    let mut history = vec![0u8; history_size];
-    let mut block = vec![0u8; MAX_BLOCK_SIZE];
-    let mut literals = vec![0u8; MAX_BLOCK_SIZE];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(history_size, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     let mut output = Vec::new();
-    let mut position = 0usize;
-
-    while position < compressed.len() {
-        let end = (position + chunk_size).min(compressed.len());
-        let mut input = &compressed[position..end];
-        loop {
-            let step = decoder.decode(input).unwrap();
-            let consumed = step.consumed();
-            position += consumed;
-            input = &input[consumed..];
-            match step {
-                DecodeStep::Output { bytes, .. } => output.extend_from_slice(bytes),
-                DecodeStep::NeedInput { .. } => {
-                    assert!(input.is_empty());
-                    break;
-                }
-                _ => {}
-            }
-        }
+    let mut collect = |bytes: &[u8]| {
+        output.extend_from_slice(bytes);
+        Ok::<_, core::convert::Infallible>(())
+    };
+    for chunk in compressed.chunks(chunk_size) {
+        decoder.push(chunk, &mut collect).unwrap();
     }
-
-    loop {
-        match decoder.decode(&[]).unwrap() {
-            DecodeStep::Output { bytes, .. } => output.extend_from_slice(bytes),
-            DecodeStep::FrameStarted { .. } | DecodeStep::FrameFinished { .. } => {}
-            DecodeStep::NeedInput { .. } => break,
-        }
-    }
-    decoder.finish().unwrap();
+    decoder.finish_with(collect).unwrap();
     output
 }
 
@@ -122,14 +97,8 @@ fn rejects_corruption_and_poisoned_decoder() {
     let mut compressed = encoder.finish().unwrap();
     *compressed.last_mut().unwrap() ^= 1;
 
-    let mut history = vec![0u8; 64 * 1024 * 1024];
-    let mut block = vec![0u8; MAX_BLOCK_SIZE];
-    let mut literals = vec![0u8; MAX_BLOCK_SIZE];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(64 * 1024 * 1024, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     let mut input = compressed.as_slice();
     let error = loop {
         match decoder.decode(input) {

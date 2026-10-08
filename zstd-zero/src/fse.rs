@@ -2,35 +2,48 @@ use crate::bitstream::{BackwardBits, ForwardBits};
 use crate::DecodeError;
 
 pub(crate) const MAX_TABLE_LOG: u8 = 9;
-const MAX_TABLE_SIZE: usize = 1 << MAX_TABLE_LOG;
-const MAX_SYMBOLS: usize = 256;
+pub(crate) const MAX_SYMBOLS: usize = 256;
 
+/// An initialized entropy-table slot; the decoder manages its contents.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Entry {
+pub struct Entry {
     pub(crate) baseline: u16,
     pub(crate) bits: u8,
     pub(crate) symbol: u8,
 }
 
-pub(crate) struct Table {
-    entries: [Entry; MAX_TABLE_SIZE],
+impl Entry {
+    /// Create an empty slot, including for statically allocated workspaces.
+    pub const fn new() -> Self {
+        Self {
+            baseline: 0,
+            bits: 0,
+            symbol: 0,
+        }
+    }
+}
+
+pub(crate) struct Table<'a> {
+    entries: &'a mut [Entry],
     len: usize,
     log: u8,
     valid: bool,
 }
 
-impl Table {
-    pub(crate) const fn new() -> Self {
+impl<'a> Table<'a> {
+    pub(crate) fn new(entries: &'a mut [Entry]) -> Self {
         Self {
-            entries: [Entry {
-                baseline: 0,
-                bits: 0,
-                symbol: 0,
-            }; MAX_TABLE_SIZE],
+            entries,
             len: 0,
             log: 0,
             valid: false,
         }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.len = 0;
+        self.log = 0;
+        self.valid = false;
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -77,8 +90,24 @@ impl Table {
         &mut self,
         probabilities: &[i16],
         table_log: u8,
+        scratch: &mut [i16],
     ) -> Result<(), DecodeError> {
-        if table_log > MAX_TABLE_LOG || probabilities.is_empty() {
+        let workspace = scratch
+            .get_mut(..probabilities.len())
+            .ok_or(DecodeError::InvalidEntropyTable)?;
+        workspace.copy_from_slice(probabilities);
+        self.build_in_place(workspace, table_log)
+    }
+
+    fn build_in_place(
+        &mut self,
+        probabilities: &mut [i16],
+        table_log: u8,
+    ) -> Result<(), DecodeError> {
+        if table_log > MAX_TABLE_LOG
+            || probabilities.is_empty()
+            || probabilities.len() > MAX_SYMBOLS
+        {
             return Err(DecodeError::InvalidEntropyTable);
         }
         if table_log == 0 {
@@ -92,7 +121,7 @@ impl Table {
 
         let table_size = 1usize << table_log;
         let mut total = 0usize;
-        for probability in probabilities {
+        for probability in probabilities.iter() {
             total = total
                 .checked_add(if *probability == -1 {
                     1
@@ -140,23 +169,25 @@ impl Table {
             return Err(DecodeError::InvalidEntropyTable);
         }
 
-        let mut next = [0u16; MAX_SYMBOLS];
-        for (symbol, probability) in probabilities.iter().enumerate() {
-            next[symbol] = match *probability {
+        // Symbol spreading no longer needs the probabilities. Reuse their
+        // storage for next-state counters (at most twice the 512-entry table).
+        for probability in probabilities.iter_mut() {
+            *probability = match *probability {
                 -1 => 1,
-                value if value > 0 => value as u16,
-                _ => 0,
+                value => value.max(0),
             };
         }
+        let next = probabilities;
         for entry in &mut self.entries[..table_size] {
             let symbol = entry.symbol as usize;
-            let state = next[symbol];
+            let state = next[symbol] as u16;
             if state == 0 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            next[symbol] = state
-                .checked_add(1)
-                .ok_or(DecodeError::InvalidEntropyTable)?;
+            // The validated probabilities sum to at most 512. A symbol's
+            // counter starts at its count and advances once per table slot,
+            // so even the final increment is at most 1024 and fits in i16.
+            next[symbol] += 1;
             let floor_log = (u16::BITS - 1 - state.leading_zeros()) as u8;
             let bits = table_log - floor_log;
             entry.bits = bits;
@@ -176,6 +207,7 @@ impl Table {
         input: &[u8],
         max_symbol: usize,
         max_log: u8,
+        scratch: &mut [i16],
     ) -> Result<usize, DecodeError> {
         if input.is_empty() || max_symbol >= MAX_SYMBOLS {
             return Err(DecodeError::InvalidEntropyTable);
@@ -188,7 +220,11 @@ impl Table {
 
         let expected = 1u32 << table_log;
         let mut accumulated = 0u32;
-        let mut probabilities = [0i16; MAX_SYMBOLS];
+        let probabilities = scratch
+            .get_mut(..MAX_SYMBOLS)
+            .ok_or(DecodeError::InvalidEntropyTable)?;
+        // Zero-run symbols must not inherit counters from a previous table.
+        probabilities.fill(0);
         let mut symbols = 0usize;
         while accumulated < expected {
             if symbols > max_symbol {
@@ -230,7 +266,37 @@ impl Table {
         if accumulated != expected {
             return Err(DecodeError::InvalidEntropyTable);
         }
-        self.build(&probabilities[..symbols], table_log)?;
+        self.build_in_place(&mut probabilities[..symbols], table_log)?;
         Ok(bits.position().div_ceil(8))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_counters_cover_the_largest_table_and_ignore_dirty_storage() {
+        let mut entries = std::vec![Entry::new(); 512];
+        let mut scratch = [i16::MIN; MAX_SYMBOLS];
+        let mut table = Table::new(&mut entries);
+        table.build(&[512], 9, &mut scratch).unwrap();
+        for state in 0..512 {
+            let entry = table.entry(state).unwrap();
+            assert_eq!(
+                (entry.symbol, entry.bits, entry.baseline),
+                (0, 0, state as u16)
+            );
+        }
+        // Reusing dirty counters must preserve zero-probability symbols and
+        // the special -1 probability without changing the predefined input.
+        let probabilities = [16, 0, -1, 15];
+        table.build(&probabilities, 5, &mut scratch).unwrap();
+        let mut counts = [0; 4];
+        for state in 0..32 {
+            counts[table.entry(state).unwrap().symbol as usize] += 1;
+        }
+        assert_eq!(counts, [16, 0, 1, 15]);
+        assert_eq!(probabilities, [16, 0, -1, 15]);
     }
 }

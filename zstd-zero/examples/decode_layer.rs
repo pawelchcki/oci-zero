@@ -23,11 +23,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut history = vec![0u8; HISTORY_SIZE];
     let mut block = vec![0u8; MAX_BLOCK_SIZE];
     let mut literals = vec![0u8; MAX_BLOCK_SIZE];
+    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
+    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
+    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
     let mut decoder = Decoder::new(DecoderBuffers {
         history: &mut history,
         block: &mut block,
         literals: &mut literals,
-    });
+        fse_scratch: &mut fse_scratch,
+        fse: &mut fse,
+        huffman: &mut huffman,
+    })
+    .map_err(invalid_data)?;
     let mut compressed_hash = Sha256::new();
     let mut decompressed_hash = Sha256::new();
     let mut compressed_size = 0u64;

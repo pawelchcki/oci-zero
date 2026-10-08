@@ -1,4 +1,6 @@
-use zstd_zero::{DecodeError, DecodeStep, Decoder, DecoderBuffers, MAX_BLOCK_SIZE};
+mod support;
+
+use zstd_zero::{DecodeError, DecodeStep, Decoder, MAX_BLOCK_SIZE};
 
 const RAW_FRAME: &[u8] = &[
     0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x05, // one-segment, content size 5
@@ -21,14 +23,8 @@ fn consume_to_boundary(decoder: &mut Decoder<'_>, mut input: &[u8]) -> Result<()
 #[test]
 fn every_raw_frame_truncation_is_detected() {
     for length in 0..RAW_FRAME.len() {
-        let mut history = [0u8; 5];
-        let mut block = [0u8; 5];
-        let mut literals = [0u8; 5];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        });
+        let mut buffers = support::Buffers::new(5, 5, 5);
+        let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
         consume_to_boundary(&mut decoder, &RAW_FRAME[..length]).unwrap();
         assert_eq!(decoder.finish(), Err(DecodeError::UnexpectedEof));
     }
@@ -37,14 +33,8 @@ fn every_raw_frame_truncation_is_detected() {
 #[test]
 fn reports_exact_caller_buffer_shortages() {
     let header = [0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x78];
-    let mut history = [0u8; 1024];
-    let mut block = [0u8; 1];
-    let mut literals = [0u8; 1];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(1024, 1, 1);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     assert_eq!(
         decoder.decode(&header).unwrap_err(),
         DecodeError::HistoryTooSmall {
@@ -53,14 +43,8 @@ fn reports_exact_caller_buffer_shortages() {
         }
     );
 
-    let mut history = [0u8; 5];
-    let mut block = [0u8; 4];
-    let mut literals = [0u8; 5];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(5, 4, 5);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     let error = loop {
         match decoder.decode(RAW_FRAME) {
             Ok(DecodeStep::FrameStarted { consumed, .. }) => {
@@ -88,14 +72,8 @@ fn dictionary_and_reserved_headers_are_rejected() {
         0x28, 0xb5, 0x2f, 0xfd, 0x21, // single segment, one-byte dictionary ID
         13, 0, // dictionary 13, zero content size
     ];
-    let mut history = [];
-    let mut block = [];
-    let mut literals = [];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(0, 0, 0);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     assert_eq!(
         decoder.decode(&dictionary_frame).unwrap_err(),
         DecodeError::UnsupportedDictionary { id: 13 }
@@ -125,14 +103,8 @@ fn arbitrary_fragmented_inputs_never_panic() {
             random ^= random << 17;
             *byte = random as u8;
         }
-        let mut history = [0u8; 4096];
-        let mut block = [0u8; 4096];
-        let mut literals = [0u8; 4096];
-        let mut decoder = Decoder::new(DecoderBuffers {
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-        });
+        let mut buffers = support::Buffers::new(4096, 4096, 4096);
+        let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
         let mut position = 0usize;
         while position < length {
             let end = core::cmp::min(position + 1 + case % 17, length);
@@ -156,14 +128,8 @@ fn arbitrary_fragmented_inputs_never_panic() {
 fn compressed_frame_reports_literal_scratch_requirement() {
     let expected = b"repeated test content ".repeat(10_000);
     let compressed = zstd::bulk::compress(&expected, 3).unwrap();
-    let mut history = vec![0u8; expected.len()];
-    let mut block = vec![0u8; MAX_BLOCK_SIZE];
-    let mut literals = [];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(expected.len(), MAX_BLOCK_SIZE, 0);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
     let mut input = compressed.as_slice();
     let error = loop {
         match decoder.decode(input) {
@@ -194,14 +160,8 @@ fn mutations_of_a_valid_compressed_frame_never_panic() {
         source.push(random as u8);
     }
     let mut compressed = zstd::bulk::compress(&source, 9).unwrap();
-    let mut history = vec![0u8; source.len()];
-    let mut block = vec![0u8; MAX_BLOCK_SIZE];
-    let mut literals = vec![0u8; MAX_BLOCK_SIZE];
-    let mut decoder = Decoder::new(DecoderBuffers {
-        history: &mut history,
-        block: &mut block,
-        literals: &mut literals,
-    });
+    let mut buffers = support::Buffers::new(source.len(), MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
+    let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
 
     for position in (0..compressed.len()).step_by(257) {
         compressed[position] ^= 0x40;
