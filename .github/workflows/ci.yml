@@ -36,7 +36,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-lint
           cache-bin: false
       - run: cargo fmt --all --check
@@ -69,7 +69,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-unit
           cache-bin: false
       - run: cargo test --workspace --exclude oci-zero-no-std-extract --exclude oci-zero-matter-qr --all-features
@@ -77,8 +77,7 @@ jobs:
   onboarding-lint:
     name: Matter onboarding lint
     runs-on: ubuntu-latest
-    # This hosted tool can use the same dependency artifacts for tests and
-    # generation. The workspace's panic=abort otherwise forces a second build.
+    # Clippy and rustdoc share dependency metadata; keep them on one runner.
     env:
       CARGO_PROFILE_DEV_PANIC: unwind
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -91,10 +90,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-onboarding-lint
           cache-bin: false
       - run: cargo clippy -p oci-zero-matter-qr --all-targets --all-features -- -D warnings
+      - run: cargo doc -p oci-zero-matter-qr --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   onboarding:
     name: Matter onboarding
@@ -112,13 +114,10 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-onboarding
           cache-bin: false
       - run: cargo test -p oci-zero-matter-qr --all-features
-      - run: cargo doc -p oci-zero-matter-qr --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
       - name: Committed Matter onboarding data is current
         run: |
           cargo run -q -p oci-zero-matter-qr
@@ -137,7 +136,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-native
           cache-bin: false
       - run: cargo clippy --release -p oci-zero-no-std-extract -- -D warnings
@@ -160,7 +159,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-conformance
           cache-bin: false
       - name: Official zstd decodeCorpus conformance
@@ -181,7 +180,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-docs
           cache-bin: false
       - run: cargo doc --workspace --exclude oci-zero-no-std-extract --exclude oci-zero-matter-qr --no-deps --all-features
@@ -198,7 +197,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: ci-package
           cache-bin: false
       - run: cargo package -p gzip-zero
@@ -260,7 +259,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: wasm-release
           cache-bin: false
           cache-directories: ~/.cache/.wasm-pack
@@ -320,7 +319,7 @@ jobs:
           targets: thumbv7em-none-eabi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: oci-zero-v1
+          prefix-key: oci-zero-v2
           shared-key: msrv-thumb
           cache-bin: false
       - run: cargo check -p oci-zero -p gzip-zero -p zstd-zero --lib --no-default-features --target thumbv7em-none-eabi
