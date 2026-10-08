@@ -191,6 +191,9 @@ These are not published crates:
 See [AGENTS.md](https://github.com/pawelchcki/oci-zero/blob/main/AGENTS.md) for the PR title convention, which is enforced in CI
 because it drives version bumps and changelogs, and for how releases are cut.
 
+[llm-cc complexity reports](.llm-cc/README.md) compare pull requests and rank
+the repository on `main`; their scores are advisory.
+
 ## License
 
 Licensed under either of

@@ -1,0 +1,43 @@
+{
+  "exclude": [
+    "target/**",
+    "**/target/**",
+    "vendor/**",
+    "**/vendor/**",
+    "**/generated/**",
+    "web/pkg/**",
+    "web/node_modules/**",
+    "web/dist/**",
+    "web/playwright-report/**",
+    "web/test-results/**"
+  ],
+  "tests": [
+    "tests/**",
+    "**/tests/**",
+    "benches/**",
+    "**/benches/**",
+    "testdata/**",
+    "**/testdata/**",
+    "fixtures/**",
+    "**/fixtures/**",
+    "fuzz/**",
+    "**/fuzz/**",
+    "*_test.*",
+    "test_*.*",
+    "**/*_test.*",
+    "**/test_*.*"
+  ],
+  "tooling": [
+    "tools/**",
+    "examples/**",
+    "no-std-extract/**",
+    "web/**",
+    "bench/**",
+    "scripts/**",
+    ".github/**"
+  ],
+  "extensions": {
+    ".mjs": "javascript"
+  },
+  "paths": []
+}
