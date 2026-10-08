@@ -201,9 +201,10 @@ jobs:
           prefix-key: oci-zero-v2
           shared-key: ci-package
           cache-bin: false
-      - run: cargo package -p gzip-zero
-      - run: cargo package -p zstd-zero
-      - run: cargo package -p oci-zero
+      # Package together so Cargo can resolve unpublished workspace versions
+      # from the packaged crates when verifying a release PR.
+      - name: Package published crates
+        run: cargo package -p gzip-zero -p zstd-zero -p oci-zero
 
   # Preserve the required check name and fail if any parallel Rust job fails.
   quality:
