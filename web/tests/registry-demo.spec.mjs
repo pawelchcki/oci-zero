@@ -5,6 +5,9 @@ const registry = process.env.OCI_ZERO_DEMO_REGISTRY_URL;
 test.skip(!registry, "Set OCI_ZERO_DEMO_REGISTRY_URL to test a live Rust/Worker demo");
 
 test("in-memory registry: browser scans overlays and downloads repository files across origins", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "showSaveFilePicker", { value: undefined });
+  });
   await page.goto("/");
   // Wait for Wasm initialization and event handlers before submitting a form.
   await expect(page.locator("#registry-presets button").first()).toBeAttached();
