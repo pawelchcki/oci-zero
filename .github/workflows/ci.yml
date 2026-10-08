@@ -78,13 +78,10 @@ jobs:
       - run: cargo doc --workspace --exclude oci-zero-no-std-extract --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: cargo package -p gzip-zero
-      - run: cargo package -p zstd-zero
-      # Packaged last: it depends on the two crates above via path + version, so
-      # this only resolves once they are published. release-plz publishes it
-      # automatically, and this is the only place a broken manifest would surface
-      # before release time.
-      - run: cargo package -p oci-zero
+      # Package together so Cargo can resolve unpublished workspace versions
+      # from the packaged crates when verifying a release PR.
+      - name: Package published crates
+        run: cargo package -p gzip-zero -p zstd-zero -p oci-zero
 
   supply-chain:
     name: Advisories
