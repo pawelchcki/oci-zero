@@ -105,48 +105,24 @@ impl Verifier {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum DigestError {
+    #[display("unsupported digest algorithm")]
     UnsupportedAlgorithm,
+    #[display("invalid SHA-256 digest length")]
     InvalidLength,
+    #[display("invalid SHA-256 digest encoding")]
     InvalidEncoding,
 }
 
-impl fmt::Display for DigestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnsupportedAlgorithm => "unsupported digest algorithm",
-            Self::InvalidLength => "invalid SHA-256 digest length",
-            Self::InvalidEncoding => "invalid SHA-256 digest encoding",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum VerifyError {
+    #[display("content size overflow")]
     SizeOverflow,
+    #[display("size mismatch: expected {expected}, got {actual}")]
     SizeMismatch { expected: u64, actual: u64 },
+    #[display("digest mismatch: expected {expected}, got {actual}")]
     DigestMismatch { expected: Digest, actual: Digest },
-}
-
-impl fmt::Display for VerifyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SizeOverflow => formatter.write_str("content size overflow"),
-            Self::SizeMismatch { expected, actual } => {
-                write!(
-                    formatter,
-                    "size mismatch: expected {expected}, got {actual}"
-                )
-            }
-            Self::DigestMismatch { expected, actual } => {
-                write!(
-                    formatter,
-                    "digest mismatch: expected {expected}, got {actual}"
-                )
-            }
-        }
-    }
 }
 
 fn hex(byte: u8) -> Result<u8, DigestError> {

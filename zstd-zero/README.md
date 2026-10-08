@@ -4,7 +4,8 @@
 [![docs.rs](https://docs.rs/zstd-zero/badge.svg)](https://docs.rs/zstd-zero)
 
 `zstd-zero` is an experimental, safe Rust decoder for standard Zstandard
-frames. The crate is `no_std`, has no dependencies, and never allocates.
+frames. The crate is `no_std` and never allocates. It uses `xxhash-rust` for streaming
+frame checksums and `derive_more` for error formatting.
 
 It requires Rust 1.75 or newer and contains no unsafe code
 (`#![forbid(unsafe_code)]`).

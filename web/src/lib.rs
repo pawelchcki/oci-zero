@@ -321,66 +321,23 @@ pub async fn scan_layer_stream(
     let mut source = ChunkSource { next_chunk };
 
     let result: Result<(), WebError> = async {
-        match browser_encoding(media_type)? {
-            Encoding::Tar => {
-                drive_layer_stream(
-                    Decoder::tar(),
-                    None,
-                    digest,
-                    compressed_size,
-                    diff_id.as_deref(),
-                    &mut source,
-                    &on_events,
-                )
-                .await
-            }
-            Encoding::Gzip => {
-                let mut history = vec![0; gzip::HISTORY_SIZE];
-                let decoder = Decoder::gzip(GzipBuffers {
-                    history: &mut history,
-                })
-                .map_err(display_web)?;
-                drive_layer_stream(
-                    decoder,
-                    None,
-                    digest,
-                    compressed_size,
-                    diff_id.as_deref(),
-                    &mut source,
-                    &on_events,
-                )
-                .await
-            }
-            Encoding::Zstd => {
-                let prefix = zstd_prefix(&mut source).await?;
-                let window = zstd_window(&prefix)?;
-                let mut history = vec![0; window];
-                let mut block = vec![0; MAX_BLOCK_SIZE];
-                let mut literals = vec![0; MAX_BLOCK_SIZE];
-                let mut fse_scratch = [0i16; zstd::FSE_SCRATCH_LEN];
-                let mut fse = vec![zstd::FseEntry::default(); zstd::FSE_ENTRIES];
-                let mut huffman = vec![zstd::HuffmanEntry::default(); zstd::HUFFMAN_ENTRIES];
-                let decoder = Decoder::zstd(ZstdBuffers {
-                    history: &mut history,
-                    block: &mut block,
-                    literals: &mut literals,
-                    fse_scratch: &mut fse_scratch,
-                    fse: &mut fse,
-                    huffman: &mut huffman,
-                })
-                .map_err(display_web)?;
-                drive_layer_stream(
-                    decoder,
-                    Some(prefix),
-                    digest,
-                    compressed_size,
-                    diff_id.as_deref(),
-                    &mut source,
-                    &on_events,
-                )
-                .await
-            }
-        }
+        let encoding = browser_encoding(media_type)?;
+        let prefix = if encoding == Encoding::Zstd {
+            Some(zstd_prefix(&mut source).await?)
+        } else {
+            None
+        };
+        let mut storage = DecoderStorage::new(encoding, prefix.as_deref().unwrap_or_default())?;
+        drive_layer_stream(
+            storage.decoder()?,
+            prefix,
+            digest,
+            compressed_size,
+            diff_id.as_deref(),
+            &mut source,
+            &on_events,
+        )
+        .await
     }
     .await;
     result.map_err(js_display)
@@ -651,56 +608,62 @@ fn with_decoder<T>(
     media_type: &str,
     run: impl FnOnce(Decoder<'_>) -> Result<T, WebError>,
 ) -> Result<T, WebError> {
-    match browser_encoding(media_type)? {
-        Encoding::Tar => run(Decoder::tar()),
-        Encoding::Gzip => {
-            let mut history = vec![0; gzip::HISTORY_SIZE];
-            let decoder = Decoder::gzip(GzipBuffers {
-                history: &mut history,
+    let mut storage = DecoderStorage::new(browser_encoding(media_type)?, bytes)?;
+    run(storage.decoder()?)
+}
+
+/// Own the browser's workspaces so streaming and buffered decoding share setup.
+// Keep the small FSE scratch array inline instead of adding a heap allocation.
+#[allow(clippy::large_enum_variant)]
+enum DecoderStorage {
+    Tar,
+    Gzip(Vec<u8>),
+    Zstd {
+        history: Vec<u8>,
+        block: Vec<u8>,
+        literals: Vec<u8>,
+        fse_scratch: [i16; zstd::FSE_SCRATCH_LEN],
+        fse: Vec<zstd::FseEntry>,
+        huffman: Vec<zstd::HuffmanEntry>,
+    },
+}
+
+impl DecoderStorage {
+    fn new(encoding: Encoding, prefix: &[u8]) -> Result<Self, WebError> {
+        Ok(match encoding {
+            Encoding::Tar => Self::Tar,
+            Encoding::Gzip => Self::Gzip(vec![0; gzip::HISTORY_SIZE]),
+            Encoding::Zstd => Self::Zstd {
+                history: vec![0; zstd_window(prefix)?],
+                block: vec![0; MAX_BLOCK_SIZE],
+                literals: vec![0; MAX_BLOCK_SIZE],
+                fse_scratch: [0; zstd::FSE_SCRATCH_LEN],
+                fse: vec![zstd::FseEntry::default(); zstd::FSE_ENTRIES],
+                huffman: vec![zstd::HuffmanEntry::default(); zstd::HUFFMAN_ENTRIES],
+            },
+        })
+    }
+
+    fn decoder(&mut self) -> Result<Decoder<'_>, WebError> {
+        match self {
+            Self::Tar => Ok(Decoder::tar()),
+            Self::Gzip(history) => Decoder::gzip(GzipBuffers { history }).map_err(display_web),
+            Self::Zstd {
+                history,
+                block,
+                literals,
+                fse_scratch,
+                fse,
+                huffman,
+            } => Decoder::zstd(ZstdBuffers {
+                history,
+                block,
+                literals,
+                fse_scratch,
+                fse,
+                huffman,
             })
-            .map_err(display_web)?;
-            run(decoder)
-        }
-        Encoding::Zstd => {
-            let window = match zstd::inspect_frame(bytes).map_err(display_web)? {
-                HeaderStatus::Complete {
-                    header: StreamHeader::Zstandard(header),
-                    ..
-                } => usize::try_from(header.window_size).map_err(|_| {
-                    WebError("Zstandard window does not fit this browser".to_owned())
-                })?,
-                HeaderStatus::Complete {
-                    header: StreamHeader::Skippable { .. },
-                    ..
-                } => {
-                    return Err(WebError(
-                        "layer starts with a skippable Zstandard frame".to_owned(),
-                    ))
-                }
-                HeaderStatus::NeedMore { .. } => {
-                    return Err(WebError("truncated Zstandard frame header".to_owned()))
-                }
-            };
-            if window > MAX_ZSTD_WINDOW {
-                return Err(WebError(
-                    "Zstandard window exceeds the 256 MiB browser limit".to_owned(),
-                ));
-            }
-            let mut history = vec![0; window];
-            let mut block = vec![0; MAX_BLOCK_SIZE];
-            let mut literals = vec![0; MAX_BLOCK_SIZE];
-            let mut fse_scratch = [0i16; zstd::FSE_SCRATCH_LEN];
-            let mut fse = vec![zstd::FseEntry::default(); zstd::FSE_ENTRIES];
-            let mut huffman = vec![zstd::HuffmanEntry::default(); zstd::HUFFMAN_ENTRIES];
-            run(Decoder::zstd(ZstdBuffers {
-                history: &mut history,
-                block: &mut block,
-                literals: &mut literals,
-                fse_scratch: &mut fse_scratch,
-                fse: &mut fse,
-                huffman: &mut huffman,
-            })
-            .map_err(display_web)?)
+            .map_err(display_web),
         }
     }
 }

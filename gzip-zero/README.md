@@ -5,7 +5,8 @@
 
 `gzip-zero` is a `no_std`, allocation-free streaming gzip decoder. It wraps
 the allocation-free core of `miniz_oxide` with incremental gzip header,
-trailer, checksum, size, and concatenated-member handling.
+trailer, checksum, size, and concatenated-member handling. Checksums use
+`crc32fast` without its `std` feature; error formatting uses `derive_more`.
 
 The caller supplies the 32 KiB DEFLATE history buffer. Input may be split at
 arbitrary byte boundaries and decoded output is returned as borrowed slices.

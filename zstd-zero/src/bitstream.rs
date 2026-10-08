@@ -28,13 +28,13 @@ impl<'a> BackwardBits<'a> {
             return Err(DecodeError::InvalidBitstream);
         }
         self.remaining -= count;
-        Ok(self.extract(self.remaining, count))
+        Ok(extract(self.data, self.remaining, count))
     }
 
     pub(crate) fn peek_padded(&self, count: u8) -> u32 {
         let count = count as usize;
         let available = core::cmp::min(count, self.remaining);
-        let value = self.extract(self.remaining - available, available);
+        let value = extract(self.data, self.remaining - available, available);
         value << (count - available)
     }
 
@@ -45,15 +45,6 @@ impl<'a> BackwardBits<'a> {
         }
         self.remaining -= count;
         Ok(())
-    }
-
-    fn extract(&self, start: usize, count: usize) -> u32 {
-        let mut value = 0u32;
-        for bit in 0..count {
-            let source = start + bit;
-            value |= (((self.data[source / 8] >> (source % 8)) & 1) as u32) << bit;
-        }
-        value
     }
 }
 
@@ -76,11 +67,7 @@ impl<'a> ForwardBits<'a> {
         if count > 32 || self.position + count > self.data.len() * 8 {
             return Err(DecodeError::InvalidBitstream);
         }
-        let mut value = 0u32;
-        for bit in 0..count {
-            let source = self.position + bit;
-            value |= (((self.data[source / 8] >> (source % 8)) & 1) as u32) << bit;
-        }
+        let value = extract(self.data, self.position, count);
         self.position += count;
         Ok(value)
     }
@@ -92,6 +79,16 @@ impl<'a> ForwardBits<'a> {
         self.position -= count;
         Ok(())
     }
+}
+
+// Both readers extract a validated range of at most 32 bits. Unaligned reads
+// span at most five bytes; padding the local word avoids per-bit iteration.
+fn extract(data: &[u8], start: usize, count: usize) -> u32 {
+    let offset = start % 8;
+    let length = (offset + count).div_ceil(8);
+    let mut word = [0u8; 8];
+    word[..length].copy_from_slice(&data[start / 8..start / 8 + length]);
+    ((u64::from_le_bytes(word) >> offset) & ((1u64 << count) - 1)) as u32
 }
 
 #[cfg(test)]

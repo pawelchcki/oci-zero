@@ -21,6 +21,9 @@ members = ["gzip-zero", "no-std-extract", "tools/matter-qr", "web", "zstd-zero",
 exclude = ["examples/esp32c3-ota"]
 resolver = "2"
 
+[workspace.dependencies]
+derive_more = { version = "1.0.0", default-features = false, features = ["display", "from"] }
+
 [profile.dev]
 panic = "abort"
 
@@ -29,7 +32,7 @@ panic = "abort"
 
 [features]
 default = []
-docker-credentials = ["dep:base64", "dep:serde", "dep:serde_json"]
+docker-credentials = ["base64ct/alloc", "dep:serde", "dep:serde_json"]
 gzip = ["dep:gzip-zero"]
 reqwless = [
     "dep:embedded-io",
@@ -41,7 +44,9 @@ tls = ["reqwless", "dep:mbedtls-rs"]
 zstd = ["dep:zstd-zero"]
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
+derive_more = { workspace = true }
+# Keep the allocation-free Base64 codec compatible with Rust 1.75.
+base64ct = { version = "=1.6.0", default-features = false }
 embedded-io = { version = "0.7", default-features = false, optional = true }
 embedded-io-async = { version = "0.7", default-features = false, optional = true }
 embedded-nal-async = { version = "0.9", optional = true }

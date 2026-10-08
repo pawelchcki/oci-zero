@@ -8,6 +8,8 @@ extern crate std;
 
 pub mod tar;
 
+mod buffer;
+
 pub mod compression;
 pub mod digest;
 #[cfg(feature = "docker-credentials")]

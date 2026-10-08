@@ -11,7 +11,7 @@ use core::fmt::{self, Write};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::digest::Digest;
+use crate::{buffer::BufferWriter, digest::Digest};
 
 /// Immutable bytes and their OCI media type and content digest.
 #[derive(Clone, Copy, Debug)]
@@ -143,14 +143,9 @@ impl fmt::Display for NextLink<'_> {
 
 /// The scratch buffer cannot hold the generated listing. No partial response
 /// is returned; the transport can retry with more space or return HTTP 500.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
+#[display("registry listing buffer too small")]
 pub struct BufferTooSmall;
-
-impl fmt::Display for BufferTooSmall {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("registry listing buffer too small")
-    }
-}
 
 impl From<fmt::Error> for BufferTooSmall {
     fn from(_: fmt::Error) -> Self {
@@ -189,66 +184,7 @@ pub fn serve<'a>(
         rest.strip_suffix("/tags/list").map(Some)
     };
     if let Some(repository) = listing {
-        if repository.is_some_and(|repo| !store.contains_repository(repo)) {
-            return Ok(error(404, "NAME_UNKNOWN", head));
-        }
-        let mut cursor = [0u8; 256];
-        let (n, last) = match pagination(query, &mut cursor) {
-            Some(value) => value,
-            None => return Ok(error(400, "UNSUPPORTED", head)),
-        };
-        let name_at = |index| match repository {
-            Some(repo) => store.tag(repo, index),
-            None => store.repository(index),
-        };
-        let mut output = Output {
-            bytes: scratch,
-            len: 0,
-        };
-        if let Some(repo) = repository {
-            write!(output, r#"{{"name":"{repo}","tags":["#)?;
-        } else {
-            output.write_str(r#"{"repositories":["#)?;
-        }
-        let mut previous = last;
-        let mut count = 0;
-        let mut emitted = None;
-        let mut next = None;
-        loop {
-            if n == 0 {
-                break;
-            }
-            // Selection avoids allocation and imposes no sorting requirement on
-            // small embedded stores. Large stores can implement indexed access.
-            let Some(name) = (0..)
-                .map_while(&name_at)
-                .filter(|name| *name > previous)
-                .min()
-            else {
-                break;
-            };
-            if count == n {
-                next = Some(NextLink {
-                    path,
-                    last: emitted.unwrap(),
-                    n,
-                });
-                break;
-            }
-            if count != 0 {
-                output.write_str(",")?;
-            }
-            // Store names follow OCI grammar: ASCII with no JSON escapes.
-            write!(output, "\"{name}\"")?;
-            previous = name;
-            emitted = Some(name);
-            count += 1;
-        }
-        output.write_str("]}")?;
-        let length = output.len;
-        let mut result = response(200, &scratch[..length], "application/json", None, head);
-        result.next = next;
-        return Ok(result);
+        return serve_listing(store, repository, path, query, scratch, head);
     }
     let Some((prefix, reference)) = rest.rsplit_once('/') else {
         return Ok(error(404, "NAME_UNKNOWN", head));
@@ -285,6 +221,73 @@ pub fn serve<'a>(
         ),
         None => error(404, missing, head),
     })
+}
+
+fn serve_listing<'a>(
+    store: &'a impl Store,
+    repository: Option<&'a str>,
+    path: &'a str,
+    query: &str,
+    scratch: &'a mut [u8],
+    head: bool,
+) -> Result<Response<'a>, BufferTooSmall> {
+    if repository.is_some_and(|repo| !store.contains_repository(repo)) {
+        return Ok(error(404, "NAME_UNKNOWN", head));
+    }
+    let mut cursor = [0u8; 256];
+    let (n, last) = match pagination(query, &mut cursor) {
+        Some(value) => value,
+        None => return Ok(error(400, "UNSUPPORTED", head)),
+    };
+    let name_at = |index| match repository {
+        Some(repo) => store.tag(repo, index),
+        None => store.repository(index),
+    };
+    let mut output = BufferWriter::new(scratch);
+    if let Some(repo) = repository {
+        write!(output, r#"{{"name":"{repo}","tags":["#)?;
+    } else {
+        output.write_str(r#"{"repositories":["#)?;
+    }
+    let mut previous = last;
+    let mut count = 0;
+    let mut emitted = None;
+    let mut next = None;
+    loop {
+        if n == 0 {
+            break;
+        }
+        // Selection avoids allocation and imposes no sorting requirement on
+        // small embedded stores. Large stores can implement indexed access.
+        let Some(name) = (0..)
+            .map_while(&name_at)
+            .filter(|name| *name > previous)
+            .min()
+        else {
+            break;
+        };
+        if count == n {
+            next = Some(NextLink {
+                path,
+                last: emitted.unwrap(),
+                n,
+            });
+            break;
+        }
+        if count != 0 {
+            output.write_str(",")?;
+        }
+        // Store names follow OCI grammar: ASCII with no JSON escapes.
+        write!(output, "\"{name}\"")?;
+        previous = name;
+        emitted = Some(name);
+        count += 1;
+    }
+    output.write_str("]}")?;
+    let length = output.len();
+    let mut result = response(200, &scratch[..length], "application/json", None, head);
+    result.next = next;
+    Ok(result)
 }
 
 fn response<'a>(
@@ -354,21 +357,4 @@ fn pagination<'a>(query: &str, cursor: &'a mut [u8]) -> Option<(usize, &'a str)>
         n.unwrap_or(usize::MAX),
         core::str::from_utf8(&cursor[..len]).ok()?,
     ))
-}
-
-struct Output<'a> {
-    bytes: &'a mut [u8],
-    len: usize,
-}
-
-impl Write for Output<'_> {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        let end = self.len.checked_add(value.len()).ok_or(fmt::Error)?;
-        self.bytes
-            .get_mut(self.len..end)
-            .ok_or(fmt::Error)?
-            .copy_from_slice(value.as_bytes());
-        self.len = end;
-        Ok(())
-    }
 }

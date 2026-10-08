@@ -2,8 +2,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use core::fmt;
-
 use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
 use miniz_oxide::inflate::TINFLStatus;
 
@@ -58,62 +56,33 @@ impl DecodeStep<'_> {
 }
 
 enum InternalStep {
-    NeedInput {
-        consumed: usize,
-    },
-    MemberStarted {
-        consumed: usize,
-        header: MemberHeader,
-    },
-    Output {
-        consumed: usize,
-        start: usize,
-        end: usize,
-    },
-    MemberFinished {
-        consumed: usize,
-    },
+    NeedInput,
+    MemberStarted(MemberHeader),
+    Output { start: usize, end: usize },
+    MemberFinished,
 }
 
 /// A malformed stream or invalid decoder configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum DecodeError {
+    #[display("gzip history must contain {HISTORY_SIZE} bytes, got {actual}")]
     InvalidHistorySize { actual: usize },
+    #[display("invalid gzip header")]
     InvalidHeader,
+    #[display("unsupported gzip compression method {method}")]
     UnsupportedCompressionMethod { method: u8 },
+    #[display("gzip header checksum mismatch")]
     InvalidHeaderChecksum,
+    #[display("invalid DEFLATE stream")]
     InvalidDeflateStream,
+    #[display("gzip data checksum mismatch: expected {expected:08x}, got {actual:08x}")]
     InvalidDataChecksum { expected: u32, actual: u32 },
+    #[display("gzip data size mismatch: expected {expected}, got {actual}")]
     InvalidDataSize { expected: u32, actual: u32 },
+    #[display("unexpected end of gzip stream")]
     UnexpectedEof,
+    #[display("gzip decoder is poisoned")]
     DecoderPoisoned,
-}
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidHistorySize { actual } => write!(
-                formatter,
-                "gzip history must contain {HISTORY_SIZE} bytes, got {actual}"
-            ),
-            Self::InvalidHeader => formatter.write_str("invalid gzip header"),
-            Self::UnsupportedCompressionMethod { method } => {
-                write!(formatter, "unsupported gzip compression method {method}")
-            }
-            Self::InvalidHeaderChecksum => formatter.write_str("gzip header checksum mismatch"),
-            Self::InvalidDeflateStream => formatter.write_str("invalid DEFLATE stream"),
-            Self::InvalidDataChecksum { expected, actual } => write!(
-                formatter,
-                "gzip data checksum mismatch: expected {expected:08x}, got {actual:08x}"
-            ),
-            Self::InvalidDataSize { expected, actual } => write!(
-                formatter,
-                "gzip data size mismatch: expected {expected}, got {actual}"
-            ),
-            Self::UnexpectedEof => formatter.write_str("unexpected end of gzip stream"),
-            Self::DecoderPoisoned => formatter.write_str("gzip decoder is poisoned"),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,7 +157,7 @@ impl<'a> Decoder<'a> {
         if self.poisoned {
             return Err(DecodeError::DecoderPoisoned);
         }
-        let step = match self.decode_inner(input) {
+        let (consumed, step) = match self.decode_inner(input) {
             Ok(step) => step,
             Err(error) => {
                 self.poisoned = true;
@@ -196,19 +165,13 @@ impl<'a> Decoder<'a> {
             }
         };
         Ok(match step {
-            InternalStep::NeedInput { consumed } => DecodeStep::NeedInput { consumed },
-            InternalStep::MemberStarted { consumed, header } => {
-                DecodeStep::MemberStarted { consumed, header }
-            }
-            InternalStep::Output {
-                consumed,
-                start,
-                end,
-            } => DecodeStep::Output {
+            InternalStep::NeedInput => DecodeStep::NeedInput { consumed },
+            InternalStep::MemberStarted(header) => DecodeStep::MemberStarted { consumed, header },
+            InternalStep::Output { start, end } => DecodeStep::Output {
                 consumed,
                 bytes: &self.history[start..end],
             },
-            InternalStep::MemberFinished { consumed } => DecodeStep::MemberFinished { consumed },
+            InternalStep::MemberFinished => DecodeStep::MemberFinished { consumed },
         })
     }
 
@@ -243,206 +206,173 @@ impl<'a> Decoder<'a> {
         self.output_position = 0;
     }
 
-    fn decode_inner(&mut self, input: &[u8]) -> Result<InternalStep, DecodeError> {
-        let mut position = 0;
+    fn decode_inner(&mut self, mut input: &[u8]) -> Result<(usize, InternalStep), DecodeError> {
+        let original_length = input.len();
         loop {
-            match self.state {
-                State::Header => {
-                    let copied =
-                        copy_into(&mut self.fixed, &mut self.fixed_len, &input[position..]);
-                    self.header_crc =
-                        crc32_update(self.header_crc, &input[position..position + copied]);
-                    position += copied;
-                    if self.fixed_len != FIXED_HEADER_SIZE {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                    if self.fixed[0..2] != [0x1f, 0x8b] || self.fixed[3] & 0xe0 != 0 {
-                        return Err(DecodeError::InvalidHeader);
-                    }
-                    if self.fixed[2] != 8 {
-                        return Err(DecodeError::UnsupportedCompressionMethod {
-                            method: self.fixed[2],
-                        });
-                    }
-                    self.flags = self.fixed[3];
-                    self.header = MemberHeader {
-                        modification_time: u32::from_le_bytes([
-                            self.fixed[4],
-                            self.fixed[5],
-                            self.fixed[6],
-                            self.fixed[7],
-                        ]),
-                        extra_flags: self.fixed[8],
-                        operating_system: self.fixed[9],
-                    };
-                    self.fixed_len = 0;
-                    self.small_len = 0;
-                    self.state = self.next_optional_state();
-                }
-                State::ExtraLength => {
-                    let copied = copy_into(
-                        &mut self.small[..2],
-                        &mut self.small_len,
-                        &input[position..],
-                    );
-                    self.header_crc =
-                        crc32_update(self.header_crc, &input[position..position + copied]);
-                    position += copied;
-                    if self.small_len != 2 {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                    self.extra_remaining =
-                        u16::from_le_bytes([self.small[0], self.small[1]]) as usize;
-                    self.small_len = 0;
-                    self.state = if self.extra_remaining == 0 {
-                        self.after_extra()
-                    } else {
-                        State::Extra
-                    };
-                }
-                State::Extra => {
-                    let length = self.extra_remaining.min(input.len() - position);
-                    self.header_crc =
-                        crc32_update(self.header_crc, &input[position..position + length]);
-                    position += length;
-                    self.extra_remaining -= length;
-                    if self.extra_remaining != 0 {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                    self.state = self.after_extra();
-                }
-                State::Name | State::Comment => {
-                    let remaining = &input[position..];
-                    let Some(end) = remaining.iter().position(|byte| *byte == 0) else {
-                        self.header_crc = crc32_update(self.header_crc, remaining);
-                        return Ok(InternalStep::NeedInput {
-                            consumed: input.len(),
-                        });
-                    };
-                    let length = end + 1;
-                    self.header_crc = crc32_update(self.header_crc, &remaining[..length]);
-                    position += length;
-                    self.state = if self.state == State::Name {
-                        self.after_name()
-                    } else {
-                        self.after_comment()
-                    };
-                }
-                State::HeaderChecksum => {
-                    let copied = copy_into(
-                        &mut self.small[..2],
-                        &mut self.small_len,
-                        &input[position..],
-                    );
-                    position += copied;
-                    if self.small_len != 2 {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                    let expected = u16::from_le_bytes([self.small[0], self.small[1]]);
-                    let actual = (!self.header_crc) as u16;
-                    if expected != actual {
-                        return Err(DecodeError::InvalidHeaderChecksum);
-                    }
-                    self.small_len = 0;
-                    self.start_deflate();
-                    return Ok(InternalStep::MemberStarted {
-                        consumed: position,
-                        header: self.header,
-                    });
-                }
-                State::StartDeflate => {
-                    self.start_deflate();
-                    return Ok(InternalStep::MemberStarted {
-                        consumed: position,
-                        header: self.header,
-                    });
-                }
-                State::Deflate => {
-                    let start = self.output_position;
-                    let (status, consumed, written) = decompress(
-                        &mut self.decompressor,
-                        &input[position..],
-                        self.history,
-                        start,
-                        inflate_flags::TINFL_FLAG_HAS_MORE_INPUT,
-                    );
-                    position += consumed;
-                    let end = start + written;
-                    // miniz never wraps within a single call, so `history[start..end]`
-                    // is contiguous and in bounds. `output_position` below preserves
-                    // `start < len`, which also guarantees at least one free byte.
-                    debug_assert!(end <= self.history.len());
-                    self.data_crc = crc32_update(self.data_crc, &self.history[start..end]);
-                    self.data_size = self.data_size.wrapping_add(written as u32);
-                    self.output_position = if end == self.history.len() { 0 } else { end };
-                    match status {
-                        TINFLStatus::Done => self.state = State::Trailer,
-                        TINFLStatus::HasMoreOutput | TINFLStatus::NeedsMoreInput => {}
-                        _ => return Err(DecodeError::InvalidDeflateStream),
-                    }
-                    if written != 0 {
-                        return Ok(InternalStep::Output {
-                            consumed: position,
-                            start,
-                            end,
-                        });
-                    }
-                    if needs_input_without_output(status)? {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                }
-                State::Trailer => {
-                    let copied =
-                        copy_into(&mut self.small, &mut self.small_len, &input[position..]);
-                    position += copied;
-                    if trailer_incomplete(self.small_len) {
-                        return Ok(InternalStep::NeedInput { consumed: position });
-                    }
-                    validate_trailer(&self.small, !self.data_crc, self.data_size)?;
-                    self.completed_members += 1;
-                    self.small_len = 0;
-                    self.state = State::Header;
-                    self.header_crc = !0;
-                    return Ok(InternalStep::MemberFinished { consumed: position });
-                }
+            if let Some(step) = self.advance(&mut input)? {
+                return Ok((original_length - input.len(), step));
             }
-
-            if position == input.len() {
-                return Ok(InternalStep::NeedInput { consumed: position });
+            if input.is_empty() {
+                return Ok((original_length, InternalStep::NeedInput));
             }
         }
     }
 
-    fn next_optional_state(&self) -> State {
-        if self.flags & 0x04 != 0 {
-            State::ExtraLength
-        } else {
-            self.after_extra()
+    // None advances the state without exposing an event to the caller.
+    fn advance(&mut self, input: &mut &[u8]) -> Result<Option<InternalStep>, DecodeError> {
+        if !self.read_fields(input) {
+            return Ok(Some(InternalStep::NeedInput));
         }
+        match self.state {
+            State::Header => self.read_member_header()?,
+            State::ExtraLength => {
+                self.extra_remaining = u16::from_le_bytes([self.small[0], self.small[1]]) as usize;
+                self.small_len = 0;
+                self.state = if self.extra_remaining == 0 {
+                    self.next_optional_state()
+                } else {
+                    State::Extra
+                };
+            }
+            State::Extra => {
+                let length = self.extra_remaining.min(input.len());
+                self.header_crc = crc32_update(self.header_crc, &input[..length]);
+                *input = &input[length..];
+                self.extra_remaining -= length;
+                if self.extra_remaining != 0 {
+                    return Ok(Some(InternalStep::NeedInput));
+                }
+                self.state = self.next_optional_state();
+            }
+            State::Name | State::Comment => {
+                let remaining = *input;
+                let Some(end) = remaining.iter().position(|byte| *byte == 0) else {
+                    self.header_crc = crc32_update(self.header_crc, remaining);
+                    *input = &[];
+                    return Ok(Some(InternalStep::NeedInput));
+                };
+                let length = end + 1;
+                self.header_crc = crc32_update(self.header_crc, &remaining[..length]);
+                *input = &input[length..];
+                self.state = self.next_optional_state();
+            }
+            State::HeaderChecksum => {
+                let expected = u16::from_le_bytes([self.small[0], self.small[1]]);
+                let actual = (!self.header_crc) as u16;
+                if expected != actual {
+                    return Err(DecodeError::InvalidHeaderChecksum);
+                }
+                self.small_len = 0;
+                self.start_deflate();
+                return Ok(Some(InternalStep::MemberStarted(self.header)));
+            }
+            State::StartDeflate => {
+                self.start_deflate();
+                return Ok(Some(InternalStep::MemberStarted(self.header)));
+            }
+            State::Deflate => return self.inflate(input),
+            State::Trailer => {
+                validate_trailer(&self.small, !self.data_crc, self.data_size)?;
+                self.completed_members += 1;
+                self.small_len = 0;
+                self.state = State::Header;
+                self.header_crc = !0;
+                return Ok(Some(InternalStep::MemberFinished));
+            }
+        }
+        Ok(None)
     }
 
-    fn after_extra(&self) -> State {
-        if self.flags & 0x08 != 0 {
-            State::Name
-        } else {
-            self.after_name()
+    fn read_member_header(&mut self) -> Result<(), DecodeError> {
+        if self.fixed[0..2] != [0x1f, 0x8b] || self.fixed[3] & 0xe0 != 0 {
+            return Err(DecodeError::InvalidHeader);
         }
+        if self.fixed[2] != 8 {
+            return Err(DecodeError::UnsupportedCompressionMethod {
+                method: self.fixed[2],
+            });
+        }
+        self.flags = self.fixed[3];
+        self.header = MemberHeader {
+            modification_time: u32::from_le_bytes([
+                self.fixed[4],
+                self.fixed[5],
+                self.fixed[6],
+                self.fixed[7],
+            ]),
+            extra_flags: self.fixed[8],
+            operating_system: self.fixed[9],
+        };
+        self.fixed_len = 0;
+        self.small_len = 0;
+        self.state = self.next_optional_state();
+
+        Ok(())
     }
 
-    fn after_name(&self) -> State {
-        if self.flags & 0x10 != 0 {
-            State::Comment
-        } else {
-            self.after_comment()
+    fn inflate(&mut self, input: &mut &[u8]) -> Result<Option<InternalStep>, DecodeError> {
+        let start = self.output_position;
+        let (status, consumed, written) = decompress(
+            &mut self.decompressor,
+            input,
+            self.history,
+            start,
+            inflate_flags::TINFL_FLAG_HAS_MORE_INPUT,
+        );
+        *input = &input[consumed..];
+        let end = start + written;
+        // miniz never wraps within a single call, so `history[start..end]`
+        // is contiguous and in bounds. `output_position` below preserves
+        // `start < len`, which also guarantees at least one free byte.
+        debug_assert!(end <= self.history.len());
+        self.data_crc = crc32_update(self.data_crc, &self.history[start..end]);
+        self.data_size = self.data_size.wrapping_add(written as u32);
+        self.output_position = if end == self.history.len() { 0 } else { end };
+        match status {
+            TINFLStatus::Done => self.state = State::Trailer,
+            TINFLStatus::HasMoreOutput | TINFLStatus::NeedsMoreInput => {}
+            _ => return Err(DecodeError::InvalidDeflateStream),
         }
+        if written != 0 {
+            return Ok(Some(InternalStep::Output { start, end }));
+        }
+        if needs_input_without_output(status)? {
+            return Ok(Some(InternalStep::NeedInput));
+        }
+
+        Ok(None)
     }
 
-    fn after_comment(&self) -> State {
-        if self.flags & 0x02 != 0 {
-            State::HeaderChecksum
-        } else {
-            State::StartDeflate
+    fn read_fields(&mut self, input: &mut &[u8]) -> bool {
+        let (buffer, filled, checksummed): (&mut [u8], &mut usize, bool) = match self.state {
+            State::Header => (&mut self.fixed, &mut self.fixed_len, true),
+            State::ExtraLength => (&mut self.small[..2], &mut self.small_len, true),
+            State::HeaderChecksum => (&mut self.small[..2], &mut self.small_len, false),
+            State::Trailer => (&mut self.small, &mut self.small_len, false),
+            _ => return true,
+        };
+        let copied = copy_into(buffer, filled, input);
+        if checksummed {
+            self.header_crc = crc32_update(self.header_crc, &input[..copied]);
         }
+        *input = &input[copied..];
+        *filled == buffer.len()
+    }
+
+    fn next_optional_state(&mut self) -> State {
+        // Consume optional fields in wire order, clearing each flag as selected.
+        for (flag, state) in [
+            (0x04, State::ExtraLength),
+            (0x08, State::Name),
+            (0x10, State::Comment),
+            (0x02, State::HeaderChecksum),
+        ] {
+            if self.flags & flag != 0 {
+                self.flags &= !flag;
+                return state;
+            }
+        }
+        State::StartDeflate
     }
 
     fn start_deflate(&mut self) {
@@ -474,10 +404,6 @@ fn needs_input_without_output(status: TINFLStatus) -> Result<bool, DecodeError> 
     }
 }
 
-fn trailer_incomplete(length: usize) -> bool {
-    length != TRAILER_SIZE
-}
-
 fn validate_trailer(
     trailer: &[u8; TRAILER_SIZE],
     actual_crc: u32,
@@ -507,34 +433,12 @@ fn copy_into(destination: &mut [u8], filled: &mut usize, input: &[u8]) -> usize 
     length
 }
 
-fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
-    for byte in bytes {
-        crc = CRC32_TABLE[((crc ^ u32::from(*byte)) & 0xff) as usize] ^ (crc >> 8);
-    }
-    crc
+fn crc32_update(crc: u32, bytes: &[u8]) -> u32 {
+    // Preserve the decoder's unfinalized CRC convention across fragments.
+    let mut hash = crc32fast::Hasher::new_with_initial(!crc);
+    hash.update(bytes);
+    !hash.finalize()
 }
-
-const fn crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut index = 0;
-    while index < table.len() {
-        let mut value = index as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            value = if value & 1 == 0 {
-                value >> 1
-            } else {
-                0xedb8_8320 ^ (value >> 1)
-            };
-            bit += 1;
-        }
-        table[index] = value;
-        index += 1;
-    }
-    table
-}
-
-const CRC32_TABLE: [u32; 256] = crc32_table();
 
 #[cfg(test)]
 mod tests {
@@ -673,8 +577,13 @@ mod tests {
 
     #[test]
     fn validates_trailer_length_checksum_and_size() {
-        assert!(trailer_incomplete(TRAILER_SIZE - 1));
-        assert!(!trailer_incomplete(TRAILER_SIZE));
+        let mut history = [0; HISTORY_SIZE];
+        let mut decoder = new_decoder(&mut history);
+        decoder.state = State::Trailer;
+        let mut input = &[0; TRAILER_SIZE - 1][..];
+        assert!(!decoder.read_fields(&mut input));
+        let mut input = &[0][..];
+        assert!(decoder.read_fields(&mut input));
 
         let mut trailer = [0; TRAILER_SIZE];
         trailer[..4].copy_from_slice(&0x1234_u32.to_le_bytes());

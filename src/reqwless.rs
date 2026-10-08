@@ -145,7 +145,7 @@ where
     if request.target.scheme != Scheme::Http {
         return Err(AdapterError::TlsRequired);
     }
-    let (host, port) = authority(request.target).map_err(cast_infallible)?;
+    let (host, port) = authority(request.target).ok_or(AdapterError::InvalidAuthority)?;
     let address = dns
         .get_host_by_name(host, AddrType::Either)
         .await
@@ -157,80 +157,51 @@ where
     execute_on(&mut stream, request, header_buffer, body_buffer, sink).await
 }
 
-pub(crate) fn authority(
-    target: Target<'_>,
-) -> Result<(&str, u16), AdapterError<core::convert::Infallible>> {
+pub(crate) fn authority(target: Target<'_>) -> Option<(&str, u16)> {
     let default_port = match target.scheme {
         Scheme::Http => 80,
         Scheme::Https => 443,
     };
     if let Some(remainder) = target.authority.strip_prefix('[') {
-        let bracket = remainder.find(']').ok_or(AdapterError::InvalidAuthority)?;
-        let end = bracket + 1;
-        let host = &target.authority[1..end];
-        let suffix = &target.authority[end + 1..];
+        let bracket = remainder.find(']')?;
+        let host = &remainder[..bracket];
+        let suffix = &remainder[bracket + 1..];
         let port = if suffix.is_empty() {
             default_port
-        } else if let Some(port) = suffix.strip_prefix(':') {
-            port.parse().map_err(|_| AdapterError::InvalidAuthority)?
         } else {
-            return Err(AdapterError::InvalidAuthority);
+            suffix.strip_prefix(':')?.parse().ok()?
         };
-        return Ok((host, port));
+        return Some((host, port));
     }
     match target.authority.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.is_empty() => Ok((
-            host,
-            port.parse().map_err(|_| AdapterError::InvalidAuthority)?,
-        )),
-        Some(_) => Err(AdapterError::InvalidAuthority),
-        None => Ok((target.authority, default_port)),
-    }
-}
-
-fn cast_infallible<E>(error: AdapterError<core::convert::Infallible>) -> AdapterError<E> {
-    match error {
-        AdapterError::Dns => AdapterError::Dns,
-        AdapterError::Network(error) => AdapterError::Network(error),
-        AdapterError::Http(error) => AdapterError::Http(error),
-        AdapterError::Sink(never) => match never {},
-        AdapterError::TlsRequired => AdapterError::TlsRequired,
-        AdapterError::InvalidAuthority => AdapterError::InvalidAuthority,
-        AdapterError::EmptyBodyBuffer => AdapterError::EmptyBodyBuffer,
-        AdapterError::TooManyHeaders => AdapterError::TooManyHeaders,
-        AdapterError::BodyTooLarge => AdapterError::BodyTooLarge,
-    }
-}
-
-#[derive(Debug)]
-pub enum AdapterError<E> {
-    Dns,
-    Network(ErrorKind),
-    Http(reqwless::Error),
-    Sink(E),
-    TlsRequired,
-    InvalidAuthority,
-    EmptyBodyBuffer,
-    TooManyHeaders,
-    BodyTooLarge,
-}
-
-impl<E: core::fmt::Display> core::fmt::Display for AdapterError<E> {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Dns => formatter.write_str("DNS lookup failed"),
-            Self::Network(error) => write!(formatter, "network operation failed: {error:?}"),
-            Self::Http(error) => write!(formatter, "HTTP operation failed: {error}"),
-            Self::Sink(error) => write!(formatter, "response sink failed: {error}"),
-            Self::TlsRequired => {
-                formatter.write_str("HTTPS requires the tls feature and connector")
-            }
-            Self::InvalidAuthority => formatter.write_str("invalid HTTP authority"),
-            Self::EmptyBodyBuffer => formatter.write_str("HTTP body buffer is empty"),
-            Self::TooManyHeaders => formatter.write_str("HTTP response has too many headers"),
-            Self::BodyTooLarge => formatter.write_str("HTTP response body size overflow"),
+        Some((host, port)) if !host.is_empty() && !port.is_empty() => {
+            Some((host, port.parse().ok()?))
         }
+        Some(_) => None,
+        None => Some((target.authority, default_port)),
     }
+}
+
+#[derive(Debug, derive_more::Display)]
+pub enum AdapterError<E> {
+    #[display("DNS lookup failed")]
+    Dns,
+    #[display("network operation failed: {_0:?}")]
+    Network(ErrorKind),
+    #[display("HTTP operation failed: {_0}")]
+    Http(reqwless::Error),
+    #[display("response sink failed: {_0}")]
+    Sink(E),
+    #[display("HTTPS requires the tls feature and connector")]
+    TlsRequired,
+    #[display("invalid HTTP authority")]
+    InvalidAuthority,
+    #[display("HTTP body buffer is empty")]
+    EmptyBodyBuffer,
+    #[display("HTTP response has too many headers")]
+    TooManyHeaders,
+    #[display("HTTP response body size overflow")]
+    BodyTooLarge,
 }
 
 #[cfg(test)]

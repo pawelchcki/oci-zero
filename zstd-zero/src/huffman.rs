@@ -22,7 +22,6 @@ pub(crate) struct Table<'a> {
     entries: &'a mut [Entry],
     scratch: FseTable<'a>,
     table_bits: u8,
-    valid: bool,
 }
 
 impl<'a> Table<'a> {
@@ -31,18 +30,16 @@ impl<'a> Table<'a> {
             entries,
             scratch,
             table_bits: 0,
-            valid: false,
         }
     }
 
     pub(crate) fn reset(&mut self) {
         self.table_bits = 0;
-        self.valid = false;
         self.scratch.reset();
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        self.valid
+        self.table_bits != 0
     }
 
     pub(crate) fn read_description(
@@ -90,7 +87,7 @@ impl<'a> Table<'a> {
         output: &mut [u8],
         strict: bool,
     ) -> Result<(), DecodeError> {
-        if !self.valid {
+        if self.table_bits == 0 {
             return Err(DecodeError::InvalidEntropyTable);
         }
         let mut bits = BackwardBits::new(input)?;
@@ -133,10 +130,10 @@ impl<'a> Table<'a> {
             u16::from_le_bytes([input[4], input[5]]) as usize,
         ];
         let mut starts = [6usize; 4];
+        // Three u16 lengths plus the six-byte header fit in usize on our
+        // supported targets, which can address a 128 KiB block.
         for (stream, size) in sizes.iter().enumerate() {
-            starts[stream + 1] = starts[stream]
-                .checked_add(*size)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
+            starts[stream + 1] = starts[stream] + size;
         }
         if starts[3] > input.len() {
             return Err(DecodeError::InvalidBitstream);
@@ -167,9 +164,8 @@ impl<'a> Table<'a> {
                 return Err(DecodeError::InvalidEntropyTable);
             }
             if *weight != 0 {
-                sum = sum
-                    .checked_add(1u32 << (*weight - 1))
-                    .ok_or(DecodeError::InvalidEntropyTable)?;
+                // At most 255 weights, each contributing at most 2^10.
+                sum += 1u32 << (*weight - 1);
             }
         }
         if sum == 0 {
@@ -179,9 +175,8 @@ impl<'a> Table<'a> {
         if table_bits > MAX_BITS as u32 {
             return Err(DecodeError::InvalidEntropyTable);
         }
-        let remainder = (1u32 << table_bits)
-            .checked_sub(sum)
-            .ok_or(DecodeError::InvalidEntropyTable)?;
+        // table_bits is floor(log2(sum)) + 1 and has been bounded above.
+        let remainder = (1u32 << table_bits) - sum;
         if !remainder.is_power_of_two() {
             return Err(DecodeError::InvalidEntropyTable);
         }
@@ -218,9 +213,8 @@ impl<'a> Table<'a> {
             }
             let width = 1usize << (table_bits - *bits);
             let start = starts[*bits as usize];
-            let end = start
-                .checked_add(width)
-                .ok_or(DecodeError::InvalidEntropyTable)?;
+            // Rank starts and widths are bounded by 256 * 2^MAX_BITS.
+            let end = start + width;
             if end > used {
                 return Err(DecodeError::InvalidEntropyTable);
             }
@@ -231,7 +225,6 @@ impl<'a> Table<'a> {
             starts[*bits as usize] = end;
         }
         self.table_bits = table_bits;
-        self.valid = true;
         Ok(())
     }
 }
@@ -255,9 +248,9 @@ fn decode_compressed_weights(
         if count >= 255 {
             return Err(DecodeError::InvalidEntropyTable);
         }
-        output[count] = table.symbol(first)?;
-        count += 1;
         let entry = table.entry(first)?;
+        output[count] = entry.symbol;
+        count += 1;
         if bits.remaining() < entry.bits as usize {
             if count >= 255 {
                 return Err(DecodeError::InvalidEntropyTable);

@@ -24,6 +24,7 @@ use helper::{run as run_helper, validate_name as validate_helper_name};
 /// Credential values are never included in this type's errors. A configured
 /// helper is executed directly, without a shell, as
 /// `docker-credential-<name> get`.
+#[derive(Default)]
 pub struct DockerCredentialProvider {
     config: DockerConfig,
     environment_auths: EnvironmentAuths,
@@ -33,11 +34,7 @@ pub struct DockerCredentialProvider {
 impl DockerCredentialProvider {
     /// Creates an empty provider which always returns no credentials.
     pub fn empty() -> Self {
-        Self {
-            config: DockerConfig::default(),
-            environment_auths: EnvironmentAuths::default(),
-            resolved: None,
-        }
+        Self::default()
     }
 
     /// Loads `$DOCKER_CONFIG/config.json`, or `~/.docker/config.json` when the
@@ -120,12 +117,6 @@ impl DockerCredentialProvider {
         }
 
         self.config.credentials_for(&server)
-    }
-}
-
-impl Default for DockerCredentialProvider {
-    fn default() -> Self {
-        Self::empty()
     }
 }
 

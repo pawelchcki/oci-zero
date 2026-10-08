@@ -29,7 +29,8 @@ they can be used without `oci-zero`.
 oci-zero = "0.2"
 ```
 
-With default features this depends only on `sha2`. Enable the decoders and
+With default features this uses `sha2` for digests, `base64ct` for in-place
+Base64, and `derive_more` for error formatting. Enable the decoders and
 transport you need (the `gzip` and `zstd` features pull in `gzip-zero` and
 `zstd-zero`, so you do not need to add them yourself):
 

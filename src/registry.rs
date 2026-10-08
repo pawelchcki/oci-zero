@@ -3,6 +3,7 @@
 use core::{fmt, str};
 
 use crate::{
+    buffer::BufferWriter,
     digest::Digest,
     json::Value,
     metadata::{JsonString, MetadataError},
@@ -91,11 +92,7 @@ pub struct RequestPlanner<'reference> {
 
 impl<'reference> RequestPlanner<'reference> {
     pub const fn new(reference: Reference<'reference>) -> Self {
-        Self {
-            repository: reference.as_repository(),
-            selector: Some(reference.selector()),
-            scheme: Scheme::Https,
-        }
+        Self::with_scheme(reference, Scheme::Https)
     }
 
     pub const fn with_scheme(reference: Reference<'reference>, scheme: Scheme) -> Self {
@@ -107,11 +104,7 @@ impl<'reference> RequestPlanner<'reference> {
     }
 
     pub const fn for_repository(repository: Repository<'reference>) -> Self {
-        Self {
-            repository,
-            selector: None,
-            scheme: Scheme::Https,
-        }
+        Self::for_repository_with_scheme(repository, Scheme::Https)
     }
 
     pub const fn for_repository_with_scheme(
@@ -142,18 +135,11 @@ impl<'reference> RequestPlanner<'reference> {
         &'buffer self,
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
-        let path_length = {
-            let selector = self.selector.ok_or(ReferenceError::MissingSelector)?;
-            let path = self.repository.manifest_path(selector, buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
+        let selector = self.selector.ok_or(ReferenceError::MissingSelector)?;
+        Ok(self.request(
+            self.repository.manifest_path(selector, buffer)?,
             MANIFEST_ACCEPT,
-        )
+        ))
     }
 
     pub fn head_manifest<'buffer>(
@@ -170,17 +156,10 @@ impl<'reference> RequestPlanner<'reference> {
         digest: Digest,
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
-        let path_length = {
-            let path = self.repository.manifest_digest_path(digest, buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
+        Ok(self.request(
+            self.repository.manifest_digest_path(digest, buffer)?,
             MANIFEST_ACCEPT,
-        )
+        ))
     }
 
     pub fn blob<'buffer>(
@@ -189,17 +168,7 @@ impl<'reference> RequestPlanner<'reference> {
         accept: &'buffer str,
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
-        let path_length = {
-            let path = self.repository.blob_path(digest, buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
-            accept,
-        )
+        Ok(self.request(self.repository.blob_path(digest, buffer)?, accept))
     }
 
     pub fn head_blob<'buffer>(
@@ -218,34 +187,17 @@ impl<'reference> RequestPlanner<'reference> {
         digest: Digest,
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
-        let path_length = {
-            let path = self.repository.referrers_path(digest, buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
+        Ok(self.request(
+            self.repository.referrers_path(digest, buffer)?,
             OCI_INDEX_ACCEPT,
-        )
+        ))
     }
 
     pub fn tags<'buffer>(
         &'buffer self,
         buffer: &'buffer mut [u8],
     ) -> Result<Request<'buffer>, RegistryError> {
-        let path_length = {
-            let path = self.repository.tags_path(buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
-            "application/json",
-        )
+        Ok(self.request(self.repository.tags_path(buffer)?, "application/json"))
     }
 
     pub fn tags_page<'buffer>(
@@ -256,17 +208,18 @@ impl<'reference> RequestPlanner<'reference> {
         if page_size == 0 {
             return Err(RegistryError::InvalidPageSize);
         }
-        let path_length = {
-            let path = self.repository.tags_page_path(page_size, buffer)?;
-            path.len()
-        };
-        request_from_path(
-            buffer,
-            path_length,
-            self.scheme,
-            self.repository.registry(),
+        Ok(self.request(
+            self.repository.tags_page_path(page_size, buffer)?,
             "application/json",
-        )
+        ))
+    }
+
+    fn request<'buffer>(
+        &'buffer self,
+        path: &'buffer str,
+        accept: &'buffer str,
+    ) -> Request<'buffer> {
+        get_request(self.scheme, self.repository.registry(), path, accept)
     }
 
     pub fn referrers_fallback<'buffer>(
@@ -405,14 +358,7 @@ impl<'a> ResponseHead<'a> {
                 )?))
             }
             404 if allow_not_found => Ok(ResponseAction::NotFound),
-            429 => Ok(ResponseAction::Retry(RetryAdvice {
-                status: self.status,
-                after: self
-                    .header("retry-after")
-                    .map(parse_retry_after)
-                    .transpose()?,
-            })),
-            500..=599 => Ok(ResponseAction::Retry(RetryAdvice {
+            429 | 500..=599 => Ok(ResponseAction::Retry(RetryAdvice {
                 status: self.status,
                 after: self
                     .header("retry-after")
@@ -560,12 +506,7 @@ impl<'a> TokenResponse<'a> {
             .len();
         let length = PREFIX.len() + token_length;
         let token = &buffer[PREFIX.len()..length];
-        if token.is_empty()
-            || !token.is_ascii()
-            || token
-                .iter()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-        {
+        if token.is_empty() || !token.iter().all(|byte| (b'!'..=b'~').contains(byte)) {
             return Err(RegistryError::InvalidTokenResponse);
         }
         str::from_utf8(&buffer[..length]).map_err(|_| RegistryError::InvalidTokenResponse)
@@ -606,27 +547,18 @@ pub fn basic_authorization<'buffer>(
     while let Some(first) = input.next() {
         let second = input.next();
         let third = input.next();
-        let encoded = [
-            BASE64[(first >> 2) as usize],
-            BASE64[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize],
-            second.map_or(b'=', |second| {
-                BASE64[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize]
-            }),
-            third.map_or(b'=', |third| BASE64[(third & 0x3f) as usize]),
-        ];
-        let end = output
-            .checked_add(encoded.len())
-            .ok_or(RegistryError::BufferTooSmall)?;
-        buffer
+        let bytes = [first, second.unwrap_or(0), third.unwrap_or(0)];
+        let length = 1 + usize::from(second.is_some()) + usize::from(third.is_some());
+        let end = output.checked_add(4).ok_or(RegistryError::BufferTooSmall)?;
+        let destination = buffer
             .get_mut(output..end)
-            .ok_or(RegistryError::BufferTooSmall)?
-            .copy_from_slice(&encoded);
+            .ok_or(RegistryError::BufferTooSmall)?;
+        use base64ct::{Base64, Encoding};
+        Base64::encode(&bytes[..length], destination).map_err(|_| RegistryError::BufferTooSmall)?;
         output = end;
     }
     str::from_utf8(&buffer[..output]).map_err(|_| RegistryError::InvalidCredentials)
 }
-
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Builds the anonymous OAuth token URL described by a Bearer challenge.
 pub fn bearer_token_url<'buffer>(
@@ -705,65 +637,38 @@ pub struct Redirect<'a> {
     pub strip_authorization: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display, derive_more::From)]
 pub enum RegistryError {
+    #[display("invalid registry reference: {_0}")]
+    #[from]
     Reference(ReferenceError),
+    #[display("invalid registry metadata: {_0}")]
+    #[from(MetadataError, crate::json::JsonError)]
     Metadata(MetadataError),
+    #[display("invalid registry URL")]
     InvalidUrl,
+    #[display("invalid registry response header")]
     InvalidHeader,
+    #[display("registry response lacks {_0}")]
     MissingHeader(&'static str),
+    #[display("invalid authentication challenge")]
     InvalidChallenge,
+    #[display("unsupported registry authentication scheme")]
     UnsupportedAuthentication,
+    #[display("invalid registry token response")]
     InvalidTokenResponse,
+    #[display("registry returned HTTP {_0}")]
     HttpStatus(u16),
+    #[display("registry scratch buffer is too small")]
     BufferTooSmall,
+    #[display("registry page size must be non-zero")]
     InvalidPageSize,
+    #[display("HTTPS to HTTP redirect was rejected")]
     InsecureRedirect,
+    #[display("relative redirect requires transport URL resolution")]
     RelativeRedirectRequiresResolution,
+    #[display("invalid registry credentials")]
     InvalidCredentials,
-}
-
-impl fmt::Display for RegistryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Reference(error) => write!(formatter, "invalid registry reference: {error}"),
-            Self::Metadata(error) => write!(formatter, "invalid registry metadata: {error}"),
-            Self::InvalidUrl => formatter.write_str("invalid registry URL"),
-            Self::InvalidHeader => formatter.write_str("invalid registry response header"),
-            Self::MissingHeader(header) => write!(formatter, "registry response lacks {header}"),
-            Self::InvalidChallenge => formatter.write_str("invalid authentication challenge"),
-            Self::UnsupportedAuthentication => {
-                formatter.write_str("unsupported registry authentication scheme")
-            }
-            Self::InvalidTokenResponse => formatter.write_str("invalid registry token response"),
-            Self::HttpStatus(status) => write!(formatter, "registry returned HTTP {status}"),
-            Self::BufferTooSmall => formatter.write_str("registry scratch buffer is too small"),
-            Self::InvalidPageSize => formatter.write_str("registry page size must be non-zero"),
-            Self::InsecureRedirect => formatter.write_str("HTTPS to HTTP redirect was rejected"),
-            Self::RelativeRedirectRequiresResolution => {
-                formatter.write_str("relative redirect requires transport URL resolution")
-            }
-            Self::InvalidCredentials => formatter.write_str("invalid registry credentials"),
-        }
-    }
-}
-
-impl From<ReferenceError> for RegistryError {
-    fn from(error: ReferenceError) -> Self {
-        Self::Reference(error)
-    }
-}
-
-impl From<MetadataError> for RegistryError {
-    fn from(error: MetadataError) -> Self {
-        Self::Metadata(error)
-    }
-}
-
-impl From<crate::json::JsonError> for RegistryError {
-    fn from(error: crate::json::JsonError) -> Self {
-        Self::Metadata(MetadataError::Json(error))
-    }
 }
 
 fn request_from_path<'a>(
@@ -774,7 +679,16 @@ fn request_from_path<'a>(
     accept: &'a str,
 ) -> Result<Request<'a>, RegistryError> {
     let path = str::from_utf8(&buffer[..path_length]).map_err(|_| RegistryError::InvalidUrl)?;
-    Ok(Request {
+    Ok(get_request(scheme, authority, path, accept))
+}
+
+fn get_request<'a>(
+    scheme: Scheme,
+    authority: &'a str,
+    path: &'a str,
+    accept: &'a str,
+) -> Request<'a> {
+    Request {
         method: Method::Get,
         target: Target {
             scheme,
@@ -783,7 +697,7 @@ fn request_from_path<'a>(
         },
         accept,
         authorization: None,
-    })
+    }
 }
 
 fn validate_authority(authority: &str) -> Result<(), RegistryError> {
@@ -813,15 +727,7 @@ fn copy_request<'a>(
 }
 
 fn append(buffer: &mut [u8], length: &mut usize, bytes: &[u8]) -> Result<(), RegistryError> {
-    let end = length
-        .checked_add(bytes.len())
-        .ok_or(RegistryError::BufferTooSmall)?;
-    buffer
-        .get_mut(*length..end)
-        .ok_or(RegistryError::BufferTooSmall)?
-        .copy_from_slice(bytes);
-    *length = end;
-    Ok(())
+    crate::buffer::append(buffer, length, bytes).map_err(|_| RegistryError::BufferTooSmall)
 }
 
 fn parse_retry_after(value: &[u8]) -> Result<RetryAfter<'_>, RegistryError> {
@@ -862,25 +768,9 @@ fn unique<'a>(current: Option<&'a str>, value: &'a str) -> Result<Option<&'a str
 }
 
 fn write_display(buffer: &mut [u8], value: impl fmt::Display) -> Result<usize, RegistryError> {
-    struct Writer<'a> {
-        bytes: &'a mut [u8],
-        length: usize,
-    }
-    impl fmt::Write for Writer<'_> {
-        fn write_str(&mut self, value: &str) -> fmt::Result {
-            let end = self.length.checked_add(value.len()).ok_or(fmt::Error)?;
-            let output = self.bytes.get_mut(self.length..end).ok_or(fmt::Error)?;
-            output.copy_from_slice(value.as_bytes());
-            self.length = end;
-            Ok(())
-        }
-    }
-    let mut writer = Writer {
-        bytes: buffer,
-        length: 0,
-    };
+    let mut writer = BufferWriter::new(buffer);
     fmt::write(&mut writer, format_args!("{value}")).map_err(|_| RegistryError::BufferTooSmall)?;
-    Ok(writer.length)
+    Ok(writer.len())
 }
 
 #[cfg(test)]
