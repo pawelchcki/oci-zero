@@ -5,3 +5,6 @@ __pycache__/
 /web/playwright-report/
 /web/dist/
 /web/test-results/
+/examples/registry-demo/pkg/
+/examples/registry-demo/node_modules/
+/examples/registry-demo/.wrangler/

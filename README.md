@@ -27,6 +27,8 @@ oci-zero = { version = "0.1", features = ["gzip", "zstd"] }
 ## Capabilities
 
 - Remain `no_std` and allocation-free by default.
+- Serve a read-only OCI registry from borrowed memory through a transport-independent
+  router, including catalog/tag pagination, manifests, blobs, and HEAD metadata.
 - Parse references, indexes, manifests, image configs, descriptors, tags,
   annotations, and referrers as lazy borrowed views over caller buffers.
 - Plan the complete read side of the OCI Distribution protocol, including
@@ -67,6 +69,11 @@ reqwless adapter requires Rust 1.91; enabling `tls` retains that
 feature-specific requirement.
 
 ## Examples
+
+[`examples/registry-demo`](examples/registry-demo/) runs an in-memory registry
+locally or as a Cloudflare Worker, using the same `no_std` serving API. Explore
+tiny layered images, a multi-platform index, and repository files packaged as
+an OCI artifact with the web explorer's **Open local demo** button.
 
 Download and verify a digest-pinned public OCI index, then print a short
 summary:

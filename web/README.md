@@ -45,6 +45,12 @@ Then enable Developer mode, choose **Load unpacked**, select this `web`
 directory, and click the extension action to open the full-page browser. Set
 `CHROME` to a Chrome or Chromium executable if it is not found automatically.
 
+For a small CORS-enabled target, run the
+[in-memory registry demo](../examples/registry-demo/) and click **Open local demo**.
+It also deploys to Cloudflare Workers; enter its workers.dev URL in the catalog
+field. The fixtures cover aliases, layered whiteouts, multi-platform images, and
+an OCI artifact containing files from this repository.
+
 The extension requests registry, anonymous token-service, and redirected blob
 origins one at a time. It sends eligible existing browser cookies but does not
 read, store, or request registry credentials. The manifest deliberately has no

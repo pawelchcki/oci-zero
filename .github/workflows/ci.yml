@@ -309,6 +309,79 @@ jobs:
           path: web/playwright-report
           retention-days: 7
 
+  registry-demo:
+    name: In-memory OCI Worker and explorer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown, thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: registry-demo
+          cache-bin: false
+          cache-directories: ~/.cache/.wasm-pack
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: wasm-pack@0.15.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            examples/registry-demo/package-lock.json
+            web/package-lock.json
+      - name: Check the ROM-backed demo without std
+        run: cargo check -p oci-zero-registry-demo --lib --target thumbv7em-none-eabi
+      - run: npm ci
+        working-directory: examples/registry-demo
+      - run: npm test
+        working-directory: examples/registry-demo
+      - name: Verify the native registry over HTTP
+        run: |
+          cargo build -p oci-zero-registry-demo --features local
+          target/debug/oci-zero-registry-demo 127.0.0.1:8788 > /tmp/oci-native.log 2>&1 &
+          native_pid=$!
+          trap 'kill "$native_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8788/v2/ > /dev/null; then break; fi
+            sleep 1
+          done
+          node examples/registry-demo/tests/smoke.mjs http://127.0.0.1:8788
+      - name: Build explorer WebAssembly
+        run: web/build.sh
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify the Worker and browser across origins
+        run: |
+          cd examples/registry-demo
+          npm run dev -- --ip 127.0.0.1 > /tmp/oci-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"' EXIT
+          for attempt in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8787/v2/ > /dev/null; then break; fi
+            sleep 1
+          done
+          node tests/smoke.mjs http://127.0.0.1:8787
+          cd ../../web
+          OCI_ZERO_DEMO_REGISTRY_URL=http://127.0.0.1:8787 npx playwright test tests/registry-demo.spec.mjs
+      - name: Upload registry demo failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: registry-demo-failures
+          path: |
+            /tmp/oci-native.log
+            /tmp/oci-worker.log
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
   msrv:
     name: Rust 1.75 / no_std
     runs-on: ubuntu-latest
