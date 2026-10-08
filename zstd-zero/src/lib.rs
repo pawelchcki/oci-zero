@@ -91,42 +91,21 @@ impl DecodeStep<'_> {
 }
 
 /// A failure while driving a [`Decoder`] through its callback API.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, derive_more::Display)]
 pub enum StreamError<E> {
+    #[display("Zstandard decode failed: {_0}")]
     Decode(DecodeError),
+    #[display("Zstandard output failed: {_0}")]
     Output(E),
+    #[display("Zstandard decoder stopped making progress")]
     DecoderStalled,
 }
 
-impl<E: core::fmt::Display> core::fmt::Display for StreamError<E> {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Decode(error) => write!(formatter, "Zstandard decode failed: {error}"),
-            Self::Output(error) => write!(formatter, "Zstandard output failed: {error}"),
-            Self::DecoderStalled => {
-                formatter.write_str("Zstandard decoder stopped making progress")
-            }
-        }
-    }
-}
-
 enum InternalStep {
-    NeedInput {
-        consumed: usize,
-    },
-    FrameStarted {
-        consumed: usize,
-        header: StreamHeader,
-    },
-    Output {
-        consumed: usize,
-        start: usize,
-        length: usize,
-    },
-    FrameFinished {
-        consumed: usize,
-        kind: FrameKind,
-    },
+    NeedInput,
+    FrameStarted(StreamHeader),
+    Output { start: usize, length: usize },
+    FrameFinished(FrameKind),
 }
 
 /// Initialized caller-owned storage, retained for the decoder's lifetime.
@@ -204,6 +183,25 @@ enum BlockKind {
     Compressed,
 }
 
+impl BlockHeader {
+    fn payload_size(self) -> usize {
+        if self.kind == BlockKind::Rle {
+            1
+        } else {
+            self.size
+        }
+    }
+}
+
+// Consume only the bytes needed by this state, retaining any following frame.
+fn fill_buffer(buffer: &mut [u8], filled: &mut usize, input: &mut &[u8]) -> bool {
+    let amount = (buffer.len() - *filled).min(input.len());
+    buffer[*filled..*filled + amount].copy_from_slice(&input[..amount]);
+    *filled += amount;
+    *input = &input[amount..];
+    *filled == buffer.len()
+}
+
 pub struct Decoder<'a> {
     fse_scratch: &'a mut [i16],
     options: DecoderOptions,
@@ -277,7 +275,7 @@ impl<'a> Decoder<'a> {
             pending_start: 0,
             pending_len: 0,
             offsets: [1, 4, 8],
-            checksum: XxHash64::new(),
+            checksum: XxHash64::new(0),
             huffman: HuffmanTable::new(
                 &mut buffers.huffman[..HUFFMAN_ENTRIES],
                 FseTable::new(scratch),
@@ -295,7 +293,7 @@ impl<'a> Decoder<'a> {
         if self.poisoned {
             return Err(DecodeError::DecoderPoisoned);
         }
-        let step = match self.decode_inner(input) {
+        let (consumed, step) = match self.decode_inner(input) {
             Ok(step) => step,
             Err(error) => {
                 self.poisoned = true;
@@ -303,21 +301,13 @@ impl<'a> Decoder<'a> {
             }
         };
         Ok(match step {
-            InternalStep::NeedInput { consumed } => DecodeStep::NeedInput { consumed },
-            InternalStep::FrameStarted { consumed, header } => {
-                DecodeStep::FrameStarted { consumed, header }
-            }
-            InternalStep::Output {
-                consumed,
-                start,
-                length,
-            } => DecodeStep::Output {
+            InternalStep::NeedInput => DecodeStep::NeedInput { consumed },
+            InternalStep::FrameStarted(header) => DecodeStep::FrameStarted { consumed, header },
+            InternalStep::Output { start, length } => DecodeStep::Output {
                 consumed,
                 bytes: &self.history[start..start + length],
             },
-            InternalStep::FrameFinished { consumed, kind } => {
-                DecodeStep::FrameFinished { consumed, kind }
-            }
+            InternalStep::FrameFinished(kind) => DecodeStep::FrameFinished { consumed, kind },
         })
     }
 
@@ -413,170 +403,168 @@ impl<'a> Decoder<'a> {
         self.frame_output = 0;
         self.pending_len = 0;
         self.offsets = [1, 4, 8];
-        self.checksum = XxHash64::new();
+        self.checksum = XxHash64::new(0);
         self.huffman.reset();
         self.literal_lengths.reset();
         self.offsets_table.reset();
         self.match_lengths.reset();
     }
 
-    fn decode_inner(&mut self, input: &[u8]) -> Result<InternalStep, DecodeError> {
-        if self.pending_len != 0 {
-            let start = self.pending_start;
-            let length = core::cmp::min(self.pending_len, self.history.len() - start);
-            self.pending_start = (start + length) % self.history.len();
-            self.pending_len -= length;
-            return Ok(InternalStep::Output {
-                consumed: 0,
-                start,
-                length,
-            });
-        }
-
-        let mut consumed = 0usize;
+    fn decode_inner(&mut self, mut input: &[u8]) -> Result<(usize, InternalStep), DecodeError> {
+        let available = input.len();
         loop {
-            match self.state {
-                State::Header => match inspect_frame(&self.header_buffer[..self.header_len])? {
-                    HeaderStatus::NeedMore { minimum } => {
-                        if consumed == input.len() {
-                            return Ok(InternalStep::NeedInput { consumed });
-                        }
-                        let amount =
-                            core::cmp::min(minimum - self.header_len, input.len() - consumed);
-                        self.header_buffer[self.header_len..self.header_len + amount]
-                            .copy_from_slice(&input[consumed..consumed + amount]);
-                        self.header_len += amount;
-                        consumed += amount;
+            let step = if self.pending_len != 0 {
+                Some(self.pending_output())
+            } else {
+                self.advance(&mut input)?
+            };
+            if let Some(step) = step {
+                return Ok((available - input.len(), step));
+            }
+        }
+    }
+
+    fn pending_output(&mut self) -> InternalStep {
+        let start = self.pending_start;
+        let length = self.pending_len.min(self.history.len() - start);
+        self.pending_start = (start + length) % self.history.len();
+        self.pending_len -= length;
+        InternalStep::Output { start, length }
+    }
+
+    // None means a state transition; Some reports an event to the caller.
+    fn advance(&mut self, input: &mut &[u8]) -> Result<Option<InternalStep>, DecodeError> {
+        match self.state {
+            State::Header => self.read_header(input),
+            State::Skippable {
+                magic,
+                size,
+                remaining,
+            } => {
+                let amount = remaining.min(input.len());
+                *input = &input[amount..];
+                let remaining = remaining - amount;
+                if remaining == 0 {
+                    self.state = State::FrameDone(FrameKind::Skippable { magic, size });
+                    Ok(None)
+                } else {
+                    self.state = State::Skippable {
+                        magic,
+                        size,
+                        remaining,
+                    };
+                    Ok(Some(InternalStep::NeedInput))
+                }
+            }
+            State::BlockHeader => self.read_block_header(input),
+            State::BlockPayload { header, filled } => self.read_block(input, header, filled),
+            State::Checksum { filled } => self.read_checksum(input, filled),
+            State::FrameDone(kind) => {
+                self.completed_frames = self
+                    .completed_frames
+                    .checked_add(1)
+                    .ok_or(DecodeError::ArithmeticOverflow)?;
+                self.current_header = None;
+                self.state = State::Header;
+                Ok(Some(InternalStep::FrameFinished(kind)))
+            }
+        }
+    }
+
+    fn read_header(&mut self, input: &mut &[u8]) -> Result<Option<InternalStep>, DecodeError> {
+        match inspect_frame(&self.header_buffer[..self.header_len])? {
+            HeaderStatus::NeedMore { minimum } => {
+                let complete = fill_buffer(
+                    &mut self.header_buffer[..minimum],
+                    &mut self.header_len,
+                    input,
+                );
+                Ok((!complete).then_some(InternalStep::NeedInput))
+            }
+            HeaderStatus::Complete { header, .. } => {
+                self.header_len = 0;
+                match header {
+                    StreamHeader::Zstandard(frame) => {
+                        self.start_frame(frame)?;
+                        self.state = State::BlockHeader;
                     }
-                    HeaderStatus::Complete { header, .. } => {
-                        self.header_len = 0;
-                        match header {
-                            StreamHeader::Zstandard(frame) => {
-                                self.start_frame(frame)?;
-                                self.state = State::BlockHeader;
-                            }
-                            StreamHeader::Skippable { magic, size } => {
-                                self.state = State::Skippable {
-                                    magic,
-                                    size,
-                                    remaining: size as usize,
-                                };
-                            }
-                        }
-                        return Ok(InternalStep::FrameStarted { consumed, header });
-                    }
-                },
-                State::Skippable {
-                    magic,
-                    size,
-                    remaining,
-                } => {
-                    let amount = core::cmp::min(remaining, input.len() - consumed);
-                    consumed += amount;
-                    let remaining = remaining - amount;
-                    if remaining == 0 {
-                        self.state = State::FrameDone(FrameKind::Skippable { magic, size });
-                    } else {
+                    StreamHeader::Skippable { magic, size } => {
                         self.state = State::Skippable {
                             magic,
                             size,
-                            remaining,
+                            remaining: size as usize,
                         };
-                        return Ok(InternalStep::NeedInput { consumed });
                     }
                 }
-                State::BlockHeader => {
-                    let amount = core::cmp::min(3 - self.block_header_len, input.len() - consumed);
-                    self.block_header_buffer[self.block_header_len..self.block_header_len + amount]
-                        .copy_from_slice(&input[consumed..consumed + amount]);
-                    self.block_header_len += amount;
-                    consumed += amount;
-                    if self.block_header_len != 3 {
-                        return Ok(InternalStep::NeedInput { consumed });
-                    }
-                    self.block_header_len = 0;
-                    let header = parse_block_header(self.block_header_buffer, self.block_limit)?;
-                    let payload_size = if header.kind == BlockKind::Rle {
-                        1
-                    } else {
-                        header.size
-                    };
-                    if payload_size > self.block.len() {
-                        return Err(DecodeError::BlockScratchTooSmall {
-                            required: payload_size,
-                            provided: self.block.len(),
-                        });
-                    }
-                    self.state = State::BlockPayload { header, filled: 0 };
-                }
-                State::BlockPayload { header, filled } => {
-                    let payload_size = if header.kind == BlockKind::Rle {
-                        1
-                    } else {
-                        header.size
-                    };
-                    let amount = core::cmp::min(payload_size - filled, input.len() - consumed);
-                    self.block[filled..filled + amount]
-                        .copy_from_slice(&input[consumed..consumed + amount]);
-                    consumed += amount;
-                    let filled = filled + amount;
-                    if filled != payload_size {
-                        self.state = State::BlockPayload { header, filled };
-                        return Ok(InternalStep::NeedInput { consumed });
-                    }
-                    self.process_block(header)?;
-                    self.state = if header.last {
-                        if self.current_header()?.has_checksum {
-                            self.checksum_buffer = [0; 4];
-                            State::Checksum { filled: 0 }
-                        } else {
-                            self.validate_frame_end()?;
-                            State::FrameDone(FrameKind::Zstandard)
-                        }
-                    } else {
-                        State::BlockHeader
-                    };
-                    if self.pending_len != 0 {
-                        let start = self.pending_start;
-                        let length = core::cmp::min(self.pending_len, self.history.len() - start);
-                        self.pending_start = (start + length) % self.history.len();
-                        self.pending_len -= length;
-                        return Ok(InternalStep::Output {
-                            consumed,
-                            start,
-                            length,
-                        });
-                    }
-                }
-                State::Checksum { filled } => {
-                    let amount = core::cmp::min(4 - filled, input.len() - consumed);
-                    self.checksum_buffer[filled..filled + amount]
-                        .copy_from_slice(&input[consumed..consumed + amount]);
-                    consumed += amount;
-                    let filled = filled + amount;
-                    if filled != 4 {
-                        self.state = State::Checksum { filled };
-                        return Ok(InternalStep::NeedInput { consumed });
-                    }
-                    let expected = u32::from_le_bytes(self.checksum_buffer);
-                    let actual = self.checksum.digest() as u32;
-                    if actual != expected {
-                        return Err(DecodeError::ChecksumMismatch { expected, actual });
-                    }
-                    self.validate_frame_end()?;
-                    self.state = State::FrameDone(FrameKind::Zstandard);
-                }
-                State::FrameDone(kind) => {
-                    self.completed_frames = self
-                        .completed_frames
-                        .checked_add(1)
-                        .ok_or(DecodeError::ArithmeticOverflow)?;
-                    self.current_header = None;
-                    self.state = State::Header;
-                    return Ok(InternalStep::FrameFinished { consumed, kind });
-                }
+                Ok(Some(InternalStep::FrameStarted(header)))
             }
         }
+    }
+
+    fn read_block_header(
+        &mut self,
+        input: &mut &[u8],
+    ) -> Result<Option<InternalStep>, DecodeError> {
+        if !fill_buffer(
+            &mut self.block_header_buffer,
+            &mut self.block_header_len,
+            input,
+        ) {
+            return Ok(Some(InternalStep::NeedInput));
+        }
+        self.block_header_len = 0;
+        let header = parse_block_header(self.block_header_buffer, self.block_limit)?;
+        let required = header.payload_size();
+        if required > self.block.len() {
+            return Err(DecodeError::BlockScratchTooSmall {
+                required,
+                provided: self.block.len(),
+            });
+        }
+        self.state = State::BlockPayload { header, filled: 0 };
+        Ok(None)
+    }
+
+    fn read_block(
+        &mut self,
+        input: &mut &[u8],
+        header: BlockHeader,
+        mut filled: usize,
+    ) -> Result<Option<InternalStep>, DecodeError> {
+        if !fill_buffer(&mut self.block[..header.payload_size()], &mut filled, input) {
+            self.state = State::BlockPayload { header, filled };
+            return Ok(Some(InternalStep::NeedInput));
+        }
+        self.process_block(header)?;
+        self.state = if !header.last {
+            State::BlockHeader
+        } else if self.current_header()?.has_checksum {
+            self.checksum_buffer = [0; 4];
+            State::Checksum { filled: 0 }
+        } else {
+            self.validate_frame_end()?;
+            State::FrameDone(FrameKind::Zstandard)
+        };
+        Ok(None)
+    }
+
+    fn read_checksum(
+        &mut self,
+        input: &mut &[u8],
+        mut filled: usize,
+    ) -> Result<Option<InternalStep>, DecodeError> {
+        if !fill_buffer(&mut self.checksum_buffer, &mut filled, input) {
+            self.state = State::Checksum { filled };
+            return Ok(Some(InternalStep::NeedInput));
+        }
+        let expected = u32::from_le_bytes(self.checksum_buffer);
+        let actual = self.checksum.digest() as u32;
+        if actual != expected {
+            return Err(DecodeError::ChecksumMismatch { expected, actual });
+        }
+        self.validate_frame_end()?;
+        self.state = State::FrameDone(FrameKind::Zstandard);
+        Ok(None)
     }
 
     fn start_frame(&mut self, header: FrameHeader) -> Result<(), DecodeError> {
@@ -663,36 +651,40 @@ impl<'a> Decoder<'a> {
         if modes & 3 != 0 {
             return Err(DecodeError::InvalidBlock);
         }
-        position += build_sequence_table(
-            &mut self.literal_lengths,
-            self.fse_scratch,
-            modes >> 6,
-            &sequence_input[position..],
-            &LL_DEFAULT,
-            6,
-            35,
-            9,
-        )?;
-        position += build_sequence_table(
-            &mut self.offsets_table,
-            self.fse_scratch,
-            (modes >> 4) & 3,
-            &sequence_input[position..],
-            &OF_DEFAULT,
-            5,
-            31,
-            8,
-        )?;
-        position += build_sequence_table(
-            &mut self.match_lengths,
-            self.fse_scratch,
-            (modes >> 2) & 3,
-            &sequence_input[position..],
-            &ML_DEFAULT,
-            6,
-            52,
-            9,
-        )?;
+        // Descriptions are serialized in literal-length, offset, match-length order.
+        for (table, mode, predefined, log, max_log) in [
+            (
+                &mut self.literal_lengths,
+                modes >> 6,
+                LL_DEFAULT.as_slice(),
+                6,
+                9,
+            ),
+            (
+                &mut self.offsets_table,
+                (modes >> 4) & 3,
+                OF_DEFAULT.as_slice(),
+                5,
+                8,
+            ),
+            (
+                &mut self.match_lengths,
+                (modes >> 2) & 3,
+                ML_DEFAULT.as_slice(),
+                6,
+                9,
+            ),
+        ] {
+            position += build_sequence_table(
+                table,
+                self.fse_scratch,
+                mode,
+                &sequence_input[position..],
+                predefined,
+                log,
+                max_log,
+            )?;
+        }
         let mut bits = BackwardBits::new(
             sequence_input
                 .get(position..)
@@ -722,18 +714,13 @@ impl<'a> Decoder<'a> {
             if ll_code >= LL_BASE.len() || ml_code >= ML_BASE.len() || of_code > 31 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            let raw_offset = (1u32 << of_code)
-                .checked_add(bits.read(of_code)?)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
-            let match_length = ML_BASE[ml_code]
-                .checked_add(bits.read(ML_BITS[ml_code])?)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
-            let literal_length = LL_BASE[ll_code]
-                .checked_add(bits.read(LL_BITS[ll_code])?)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
-            let literal_end = literal_position
-                .checked_add(literal_length as usize)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
+            // Validated codes bound each sum to u32: offsets use at most 31
+            // extra bits; lengths use at most 16. Literal positions and lengths
+            // are bounded by the 128 KiB block limit, so their usize sum fits too.
+            let raw_offset = (1u32 << of_code) + bits.read(of_code)?;
+            let match_length = ML_BASE[ml_code] + bits.read(ML_BITS[ml_code])?;
+            let literal_length = LL_BASE[ll_code] + bits.read(LL_BITS[ll_code])?;
+            let literal_end = literal_position + literal_length as usize;
             if literal_end > literal_count {
                 return Err(DecodeError::InvalidBlock);
             }
@@ -872,27 +859,12 @@ pub fn inspect_frame(input: &[u8]) -> Result<HeaderStatus, DecodeError> {
     let single_segment = descriptor & 0x20 != 0;
     let dictionary_size = [0usize, 1, 2, 4][(descriptor & 3) as usize];
     let content_flag = descriptor >> 6;
-    let content_size_bytes = match content_flag {
-        0 if single_segment => 1,
-        0 => 0,
-        1 => 2,
-        2 => 4,
-        _ => 8,
-    };
+    let content_size_bytes = [usize::from(single_segment), 2, 4, 8][content_flag as usize];
     let size = 5 + usize::from(!single_segment) + dictionary_size + content_size_bytes;
     if input.len() < size {
         return Ok(HeaderStatus::NeedMore { minimum: size });
     }
-    let mut position = 5usize;
-    let encoded_window = if single_segment {
-        None
-    } else {
-        let value = input[position];
-        position += 1;
-        let exponent = (value >> 3) as u32;
-        let base = 1u64 << (10 + exponent);
-        Some(base + (base / 8) * (value as u64 & 7))
-    };
+    let mut position = 5 + usize::from(!single_segment);
     let dictionary_id = read_variable(&input[position..position + dictionary_size]);
     position += dictionary_size;
     let content_size = if content_size_bytes == 0 {
@@ -907,7 +879,10 @@ pub fn inspect_frame(input: &[u8]) -> Result<HeaderStatus, DecodeError> {
     let window_size = if single_segment {
         content_size.ok_or(DecodeError::InvalidFrameHeader)?
     } else {
-        encoded_window.ok_or(DecodeError::InvalidFrameHeader)?
+        let value = input[5];
+        let exponent = (value >> 3) as u32;
+        let base = 1u64 << (10 + exponent);
+        base + (base / 8) * (value as u64 & 7)
     };
     Ok(HeaderStatus::Complete {
         header: StreamHeader::Zstandard(FrameHeader {
@@ -951,26 +926,18 @@ fn decode_literals(
     let kind = first & 3;
     let format = (first >> 2) & 3;
     if kind <= 1 {
-        let (regenerated, header_size): (usize, usize) = match format {
-            0 | 2 => ((first >> 3) as usize, 1),
-            1 => {
-                let second = *input.get(1).ok_or(DecodeError::InvalidBlock)?;
-                (((first >> 4) as usize) | ((second as usize) << 4), 2)
-            }
-            _ => {
-                let second = *input.get(1).ok_or(DecodeError::InvalidBlock)?;
-                let third = *input.get(2).ok_or(DecodeError::InvalidBlock)?;
-                (
-                    ((first >> 4) as usize) | ((second as usize) << 4) | ((third as usize) << 12),
-                    3,
-                )
-            }
+        let header_size = match format {
+            0 | 2 => 1,
+            1 => 2,
+            _ => 3,
         };
+        let packed = read_variable_u64(input.get(..header_size).ok_or(DecodeError::InvalidBlock)?);
+        let regenerated = (packed >> if header_size == 1 { 3 } else { 4 }) as usize;
         ensure_literal_space(regenerated, output.len(), block_limit)?;
         return if kind == 0 {
-            let end = header_size
-                .checked_add(regenerated)
-                .ok_or(DecodeError::ArithmeticOverflow)?;
+            // The header is at most three bytes and the literal count was
+            // checked against the 128 KiB block limit above.
+            let end = header_size + regenerated;
             let source = input
                 .get(header_size..end)
                 .ok_or(DecodeError::InvalidBlock)?;
@@ -982,49 +949,19 @@ fn decode_literals(
             Ok((regenerated, header_size + 1))
         };
     }
-    let (regenerated, compressed, streams, header_size): (usize, usize, usize, usize) = match format
-    {
-        0 | 1 => {
-            if input.len() < 3 {
-                return Err(DecodeError::InvalidBlock);
-            }
-            let combined = input[0] as u32 | (input[1] as u32) << 8 | (input[2] as u32) << 16;
-            (
-                ((combined >> 4) & 0x3ff) as usize,
-                ((combined >> 14) & 0x3ff) as usize,
-                if format == 0 { 1 } else { 4 },
-                3,
-            )
-        }
-        2 => {
-            if input.len() < 4 {
-                return Err(DecodeError::InvalidBlock);
-            }
-            let combined = read_u32(input);
-            (
-                ((combined >> 4) & 0x3fff) as usize,
-                ((combined >> 18) & 0x3fff) as usize,
-                4,
-                4,
-            )
-        }
-        _ => {
-            if input.len() < 5 {
-                return Err(DecodeError::InvalidBlock);
-            }
-            let combined = read_variable_u64(&input[..5]);
-            (
-                ((combined >> 4) & 0x3ffff) as usize,
-                ((combined >> 22) & 0x3ffff) as usize,
-                4,
-                5,
-            )
-        }
+    let (header_size, size_bits) = match format {
+        0 | 1 => (3, 10),
+        2 => (4, 14),
+        _ => (5, 18),
     };
+    let packed = read_variable_u64(input.get(..header_size).ok_or(DecodeError::InvalidBlock)?);
+    let mask = (1 << size_bits) - 1;
+    let regenerated = ((packed >> 4) & mask) as usize;
+    let compressed = ((packed >> (4 + size_bits)) & mask) as usize;
     ensure_literal_space(regenerated, output.len(), block_limit)?;
-    let end = header_size
-        .checked_add(compressed)
-        .ok_or(DecodeError::ArithmeticOverflow)?;
+    // The encoded size is at most 18 bits; adding a five-byte header fits
+    // in usize on every target that can address a 128 KiB block.
+    let end = header_size + compressed;
     let mut encoded = input
         .get(header_size..end)
         .ok_or(DecodeError::InvalidBlock)?;
@@ -1034,7 +971,7 @@ fn decode_literals(
     } else if !table.is_valid() {
         return Err(DecodeError::InvalidEntropyTable);
     }
-    if streams == 1 {
+    if format == 0 {
         table.decode(encoded, &mut output[..regenerated], strict)?;
     } else {
         table.decode_four(encoded, &mut output[..regenerated], strict)?;
@@ -1076,7 +1013,6 @@ fn parse_sequence_count(input: &[u8]) -> Result<(usize, usize), DecodeError> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_sequence_table(
     table: &mut FseTable<'_>,
     scratch: &mut [i16],
@@ -1084,7 +1020,6 @@ fn build_sequence_table(
     input: &[u8],
     predefined: &[i16],
     predefined_log: u8,
-    max_symbol: usize,
     max_log: u8,
 ) -> Result<usize, DecodeError> {
     match mode {
@@ -1096,7 +1031,7 @@ fn build_sequence_table(
             table.build_rle(*input.first().ok_or(DecodeError::InvalidEntropyTable)?);
             Ok(1)
         }
-        2 => table.read_description(input, max_symbol, max_log, scratch),
+        2 => table.read_description(input, predefined.len() - 1, max_log, scratch),
         3 if table.is_valid() => Ok(0),
         _ => Err(DecodeError::InvalidEntropyTable),
     }
@@ -1107,54 +1042,24 @@ fn resolve_offset(
     literal_length: u32,
     repeated: &mut [u32; 3],
 ) -> Result<u32, DecodeError> {
-    let value = if encoded > 3 {
-        let value = encoded - 3;
-        repeated[2] = repeated[1];
-        repeated[1] = repeated[0];
-        repeated[0] = value;
-        value
-    } else if literal_length != 0 {
-        match encoded {
-            1 => repeated[0],
-            2 => {
-                repeated.swap(0, 1);
-                repeated[0]
-            }
-            3 => {
-                let value = repeated[2];
-                repeated[2] = repeated[1];
-                repeated[1] = repeated[0];
-                repeated[0] = value;
-                value
-            }
-            _ => return Err(DecodeError::InvalidOffset),
-        }
-    } else {
-        match encoded {
-            1 => {
-                repeated.swap(0, 1);
-                repeated[0]
-            }
-            2 => {
-                let value = repeated[2];
-                repeated[2] = repeated[1];
-                repeated[1] = repeated[0];
-                repeated[0] = value;
-                value
-            }
-            3 => {
-                let value = repeated[0]
-                    .checked_sub(1)
-                    .filter(|value| *value != 0)
-                    .ok_or(DecodeError::InvalidOffset)?;
-                repeated[2] = repeated[1];
-                repeated[1] = repeated[0];
-                repeated[0] = value;
-                value
-            }
-            _ => return Err(DecodeError::InvalidOffset),
-        }
+    let index = match encoded {
+        0 => return Err(DecodeError::InvalidOffset),
+        1..=3 => encoded as usize - 1 + usize::from(literal_length == 0),
+        _ => 2,
     };
+    let value = if encoded > 3 {
+        encoded - 3
+    } else if index == 3 {
+        repeated[0]
+            .checked_sub(1)
+            .filter(|value| *value != 0)
+            .ok_or(DecodeError::InvalidOffset)?
+    } else {
+        repeated[index]
+    };
+    // A selected repeat moves to the front; a new offset evicts the oldest.
+    repeated[..=index.min(2)].rotate_right(1);
+    repeated[0] = value;
     Ok(value)
 }
 

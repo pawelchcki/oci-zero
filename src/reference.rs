@@ -2,26 +2,24 @@
 
 use core::fmt::{self, Write as _};
 
-use crate::digest::{Digest, DigestError};
+use crate::{
+    buffer::BufferWriter,
+    digest::{Digest, DigestError},
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum Scheme {
+    #[display("http")]
     Http,
+    #[display("https")]
     Https,
 }
 
-impl fmt::Display for Scheme {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum Selector<'a> {
+    #[display("{_0}")]
     Tag(&'a str),
+    #[display("{_0}")]
     Digest(Digest),
 }
 
@@ -78,18 +76,10 @@ impl<'a> Repository<'a> {
         selector: Selector<'_>,
         buffer: &'buffer mut [u8],
     ) -> Result<&'buffer str, ReferenceError> {
-        let mut writer = BufferWriter::new(buffer);
-        write!(writer, "/v2/{}/manifests/", self.repository)
-            .map_err(|_| ReferenceError::BufferTooSmall)?;
-        match selector {
-            Selector::Tag(tag) => writer
-                .write_str(tag)
-                .map_err(|_| ReferenceError::BufferTooSmall)?,
-            Selector::Digest(digest) => {
-                write!(writer, "{digest}").map_err(|_| ReferenceError::BufferTooSmall)?
-            }
-        }
-        writer.finish()
+        write_path(
+            buffer,
+            format_args!("/v2/{}/manifests/{selector}", self.repository),
+        )
     }
 
     pub fn manifest_digest_path<'buffer>(
@@ -238,31 +228,24 @@ impl<'a> Reference<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum ReferenceError {
+    #[display("OCI reference must start with oci://")]
     InvalidScheme,
+    #[display("invalid OCI registry authority")]
     InvalidRegistry,
+    #[display("OCI reference is missing a repository")]
     MissingRepository,
+    #[display("invalid OCI repository name")]
     InvalidRepository,
+    #[display("OCI reference is missing a tag or digest")]
     MissingSelector,
+    #[display("invalid OCI tag")]
     InvalidTag,
+    #[display("invalid OCI digest")]
     Digest(DigestError),
+    #[display("request path buffer is too small")]
     BufferTooSmall,
-}
-
-impl fmt::Display for ReferenceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidScheme => "OCI reference must start with oci://",
-            Self::InvalidRegistry => "invalid OCI registry authority",
-            Self::MissingRepository => "OCI reference is missing a repository",
-            Self::InvalidRepository => "invalid OCI repository name",
-            Self::MissingSelector => "OCI reference is missing a tag or digest",
-            Self::InvalidTag => "invalid OCI tag",
-            Self::Digest(_) => "invalid OCI digest",
-            Self::BufferTooSmall => "request path buffer is too small",
-        })
-    }
 }
 
 fn validate_registry(registry: &str) -> Result<(), ReferenceError> {
@@ -281,32 +264,17 @@ fn validate_repository(repository: &str) -> Result<(), ReferenceError> {
     if repository.is_empty() || repository.len() > 255 {
         return Err(ReferenceError::InvalidRepository);
     }
-    for component in repository.split('/') {
+    // Dots, underscores and slashes separate nonempty alphanumeric-ended runs.
+    // Hyphens may repeat inside a run, but cannot border another separator.
+    for component in repository.split(['/', '.', '_']) {
         let bytes = component.as_bytes();
-        if bytes.is_empty()
-            || !is_lower_alphanumeric(bytes[0])
-            || !is_lower_alphanumeric(*bytes.last().unwrap_or(&0))
+        if !bytes.first().copied().is_some_and(is_lower_alphanumeric)
+            || !bytes.last().copied().is_some_and(is_lower_alphanumeric)
+            || !bytes
+                .iter()
+                .all(|byte| is_lower_alphanumeric(*byte) || *byte == b'-')
         {
             return Err(ReferenceError::InvalidRepository);
-        }
-        let mut index = 1;
-        while index + 1 < bytes.len() {
-            if is_lower_alphanumeric(bytes[index]) {
-                index += 1;
-                continue;
-            }
-            match bytes[index] {
-                b'.' | b'_' => index += 1,
-                b'-' => {
-                    while index < bytes.len() && bytes[index] == b'-' {
-                        index += 1;
-                    }
-                }
-                _ => return Err(ReferenceError::InvalidRepository),
-            }
-            if index >= bytes.len() || !is_lower_alphanumeric(bytes[index]) {
-                return Err(ReferenceError::InvalidRepository);
-            }
         }
     }
     Ok(())
@@ -338,33 +306,7 @@ fn write_path<'a>(
     writer
         .write_fmt(arguments)
         .map_err(|_| ReferenceError::BufferTooSmall)?;
-    writer.finish()
-}
-
-struct BufferWriter<'a> {
-    buffer: &'a mut [u8],
-    length: usize,
-}
-
-impl<'a> BufferWriter<'a> {
-    fn new(buffer: &'a mut [u8]) -> Self {
-        Self { buffer, length: 0 }
-    }
-
-    fn finish(self) -> Result<&'a str, ReferenceError> {
-        core::str::from_utf8(&self.buffer[..self.length])
-            .map_err(|_| ReferenceError::BufferTooSmall)
-    }
-}
-
-impl fmt::Write for BufferWriter<'_> {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        let end = self.length.checked_add(value.len()).ok_or(fmt::Error)?;
-        let destination = self.buffer.get_mut(self.length..end).ok_or(fmt::Error)?;
-        destination.copy_from_slice(value.as_bytes());
-        self.length = end;
-        Ok(())
-    }
+    writer.finish().map_err(|_| ReferenceError::BufferTooSmall)
 }
 
 #[cfg(test)]

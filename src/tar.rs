@@ -1,7 +1,5 @@
 //! Allocation-free extraction of one regular file from a tar stream.
 
-use core::fmt;
-
 const BLOCK_SIZE: usize = 512;
 const NAME_RANGE: core::ops::Range<usize> = 0..100;
 const SIZE_RANGE: core::ops::Range<usize> = 124..136;
@@ -51,17 +49,23 @@ impl TarWriter {
 
         let mut header = [0u8; BLOCK_SIZE];
         header[..path.len()].copy_from_slice(path);
-        write_octal(&mut header[100..108], mode as u64).map_err(cast_write_error)?;
-        write_octal(&mut header[108..116], 0).map_err(cast_write_error)?;
-        write_octal(&mut header[116..124], 0).map_err(cast_write_error)?;
-        write_octal(&mut header[SIZE_RANGE], size).map_err(cast_write_error)?;
-        write_octal(&mut header[136..148], 0).map_err(cast_write_error)?;
+        write_octal(&mut header[100..108], mode as u64)
+            .map_err(|_| TarWriteError::ValueTooLarge)?;
+        write_octal(&mut header[SIZE_RANGE], size).map_err(|_| TarWriteError::ValueTooLarge)?;
+        // UID, GID and mtime are deterministic zeroes. The initialized header
+        // already supplies each field's terminating NUL.
+        for digits in [108..115, 116..123, 136..147] {
+            header[digits].fill(b'0');
+        }
         header[CHECKSUM_RANGE].fill(b' ');
         header[TYPE_OFFSET] = b'0';
         header[257..263].copy_from_slice(b"ustar\0");
         header[263..265].copy_from_slice(b"00");
         let checksum = header.iter().map(|byte| *byte as u64).sum();
-        write_checksum(&mut header[CHECKSUM_RANGE], checksum).map_err(cast_write_error)?;
+        let checksum_field = &mut header[CHECKSUM_RANGE];
+        write_octal(&mut checksum_field[..7], checksum)
+            .map_err(|_| TarWriteError::ValueTooLarge)?;
+        checksum_field[7] = b' ';
         output(&header).map_err(TarWriteError::Output)?;
         self.state = WriteState::File {
             remaining: size,
@@ -99,8 +103,7 @@ impl TarWriter {
         if remaining != 0 {
             return Err(TarWriteError::SizeMismatch { remaining });
         }
-        let size_remainder = (size % BLOCK_SIZE as u64) as usize;
-        let padding = (BLOCK_SIZE - size_remainder) % BLOCK_SIZE;
+        let padding = padding_for(size);
         if padding != 0 {
             output(&[0; BLOCK_SIZE][..padding]).map_err(TarWriteError::Output)?;
         }
@@ -127,119 +130,62 @@ impl Default for TarWriter {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum TarWriteError<E> {
+    #[display("invalid tar writer state")]
     InvalidState,
+    #[display("invalid tar member path")]
     InvalidPath,
+    #[display("tar header value is too large")]
     ValueTooLarge,
+    #[display("tar member received too much data")]
     TooMuchData,
+    #[display("tar member is missing {remaining} bytes")]
     SizeMismatch { remaining: u64 },
+    #[display("tar writer output failed: {_0}")]
     Output(E),
 }
 
-impl<E: fmt::Display> fmt::Display for TarWriteError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidState => formatter.write_str("invalid tar writer state"),
-            Self::InvalidPath => formatter.write_str("invalid tar member path"),
-            Self::ValueTooLarge => formatter.write_str("tar header value is too large"),
-            Self::TooMuchData => formatter.write_str("tar member received too much data"),
-            Self::SizeMismatch { remaining } => {
-                write!(formatter, "tar member is missing {remaining} bytes")
-            }
-            Self::Output(error) => write!(formatter, "tar writer output failed: {error}"),
-        }
-    }
-}
-
-fn write_octal(
-    field: &mut [u8],
-    mut value: u64,
-) -> Result<(), TarWriteError<core::convert::Infallible>> {
+fn write_octal(field: &mut [u8], mut value: u64) -> Result<(), ()> {
     field.fill(b'0');
-    let digits = field
-        .len()
-        .checked_sub(1)
-        .ok_or(TarWriteError::ValueTooLarge)?;
+    let digits = field.len().checked_sub(1).ok_or(())?;
     field[digits] = 0;
     for index in (0..digits).rev() {
         field[index] = b'0' + (value & 7) as u8;
         value >>= 3;
     }
     if value != 0 {
-        return Err(TarWriteError::ValueTooLarge);
+        return Err(());
     }
     Ok(())
-}
-
-fn write_checksum(
-    field: &mut [u8],
-    mut value: u64,
-) -> Result<(), TarWriteError<core::convert::Infallible>> {
-    field.fill(b'0');
-    field[6] = 0;
-    field[7] = b' ';
-    for index in (0..6).rev() {
-        field[index] = b'0' + (value & 7) as u8;
-        value >>= 3;
-    }
-    if value != 0 {
-        return Err(TarWriteError::ValueTooLarge);
-    }
-    Ok(())
-}
-
-fn cast_write_error<E>(error: TarWriteError<core::convert::Infallible>) -> TarWriteError<E> {
-    match error {
-        TarWriteError::InvalidState => TarWriteError::InvalidState,
-        TarWriteError::InvalidPath => TarWriteError::InvalidPath,
-        TarWriteError::ValueTooLarge => TarWriteError::ValueTooLarge,
-        TarWriteError::TooMuchData => TarWriteError::TooMuchData,
-        TarWriteError::SizeMismatch { remaining } => TarWriteError::SizeMismatch { remaining },
-        TarWriteError::Output(never) => match never {},
-    }
 }
 
 /// A failure encountered while consuming a tar stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum ExtractError<E> {
     /// A header checksum did not match its contents.
+    #[display("invalid tar header checksum")]
     InvalidChecksum,
     /// A header contained an invalid or unsupported size field.
+    #[display("invalid tar entry size")]
     InvalidSize,
     /// A non-zero header followed the first end-of-archive block.
+    #[display("invalid tar end marker")]
     InvalidEndMarker,
     /// The output callback failed.
+    #[display("tar output failed: {_0}")]
     Output(E),
 }
 
-impl<E: fmt::Display> fmt::Display for ExtractError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidChecksum => formatter.write_str("invalid tar header checksum"),
-            Self::InvalidSize => formatter.write_str("invalid tar entry size"),
-            Self::InvalidEndMarker => formatter.write_str("invalid tar end marker"),
-            Self::Output(error) => write!(formatter, "tar output failed: {error}"),
-        }
-    }
-}
-
 /// A failure detected when the end of the input stream is reported.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum FinishError {
     /// The stream ended inside an entry, a header, or the end marker.
+    #[display("unexpected end of tar stream")]
     UnexpectedEof,
     /// The archive ended without a matching regular file.
+    #[display("tar entry not found")]
     NotFound,
-}
-
-impl fmt::Display for FinishError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedEof => formatter.write_str("unexpected end of tar stream"),
-            Self::NotFound => formatter.write_str("tar entry not found"),
-        }
-    }
 }
 
 /// Extracts the first regular file whose path exactly matches `target`.
@@ -503,17 +449,11 @@ pub struct PaxRecord<'a> {
 /// Iterator over validated PAX records.
 pub struct PaxRecords<'a> {
     bytes: &'a [u8],
-    position: usize,
-    failed: bool,
 }
 
 impl<'a> PaxRecords<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
-        Self {
-            bytes,
-            position: 0,
-            failed: false,
-        }
+        Self { bytes }
     }
 }
 
@@ -521,19 +461,15 @@ impl<'a> Iterator for PaxRecords<'a> {
     type Item = Result<PaxRecord<'a>, PaxError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed || self.position == self.bytes.len() {
+        if self.bytes.is_empty() {
             return None;
         }
-        match parse_pax_record(self.bytes, self.position) {
-            Ok((record, next)) => {
-                self.position = next;
-                Some(Ok(record))
-            }
-            Err(error) => {
-                self.failed = true;
-                Some(Err(error))
-            }
-        }
+        let result = parse_pax_record(self.bytes);
+        self.bytes = match &result {
+            Ok((_, length)) => &self.bytes[*length..],
+            Err(_) => &[],
+        };
+        Some(result.map(|(record, _)| record))
     }
 }
 
@@ -695,62 +631,30 @@ impl<'a> Archive<'a> {
 
         let mut size = parse_number(&self.header[SIZE_RANGE]).ok_or(ArchiveError::InvalidSize)?;
         let type_flag = self.header[TYPE_OFFSET];
-        match type_flag {
-            b'L' | b'K' | b'x' => {
-                self.current = match type_flag {
-                    b'L' => {
-                        self.path_len = 0;
-                        ArchiveEntry::LongPath
-                    }
-                    b'K' => {
-                        self.link_len = 0;
-                        ArchiveEntry::LongLink
-                    }
-                    _ => {
-                        self.pax_len = 0;
-                        ArchiveEntry::Pax
-                    }
-                };
-                self.entry_remaining = size;
-                self.padding_remaining = padding_for(size);
-                if size == 0 {
-                    self.finish_content(sink)?;
-                }
-                return Ok(());
-            }
-            b'g' => return Err(ArchiveError::UnsupportedGlobalPax),
-            _ => {}
+        if self.start_extension(type_flag, size, sink)? {
+            return Ok(());
         }
 
-        if self.pending_pax {
-            validate_pax(&self.pax[..self.pax_len])?;
-            if let Some(value) = pax_value(&self.pax[..self.pax_len], b"size")? {
-                size = decimal(value).ok_or(ArchiveError::InvalidSize)?;
-            }
+        let pax = if self.pending_pax {
+            &self.pax[..self.pax_len]
+        } else {
+            &[]
+        };
+        let [pax_size, pax_path, pax_link] = pax_overrides(pax)?;
+        if let Some(value) = pax_size {
+            size = decimal(value).ok_or(ArchiveError::InvalidSize)?;
         }
 
-        if self.pending_pax {
-            if let Some(value) = pax_value(&self.pax[..self.pax_len], b"path")? {
-                self.path_len = copy_scratch(self.path, value, Scratch::Path)?;
-            } else if !self.pending_long_path {
-                self.path_len = header_path(&self.header, self.path)?;
-            }
+        if let Some(value) = pax_path {
+            self.path_len = copy_scratch(self.path, value, Scratch::Path)?;
         } else if !self.pending_long_path {
             self.path_len = header_path(&self.header, self.path)?;
         }
         trim_nul(self.path, &mut self.path_len);
         self.path_len = normalize_path(self.path, self.path_len)?;
 
-        if self.pending_pax {
-            if let Some(value) = pax_value(&self.pax[..self.pax_len], b"linkpath")? {
-                self.link_len = copy_scratch(self.link, value, Scratch::Link)?;
-            } else if !self.pending_long_link {
-                self.link_len = copy_scratch(
-                    self.link,
-                    nul_terminated(&self.header[157..257]),
-                    Scratch::Link,
-                )?;
-            }
+        if let Some(value) = pax_link {
+            self.link_len = copy_scratch(self.link, value, Scratch::Link)?;
         } else if !self.pending_long_link {
             self.link_len = copy_scratch(
                 self.link,
@@ -795,38 +699,27 @@ impl<'a> Archive<'a> {
             return Ok(());
         }
 
-        let mode = parse_number(&self.header[100..108]).ok_or(ArchiveError::InvalidMetadata)?;
-        let uid = parse_number(&self.header[108..116]).ok_or(ArchiveError::InvalidMetadata)?;
-        let gid = parse_number(&self.header[116..124]).ok_or(ArchiveError::InvalidMetadata)?;
-        let mtime = parse_number(&self.header[136..148]).ok_or(ArchiveError::InvalidMetadata)?;
-        let has_device = matches!(kind, EntryKind::CharacterDevice | EntryKind::BlockDevice);
-        let device_major = has_device
-            .then(|| parse_number(&self.header[329..337]))
-            .flatten();
-        let device_minor = has_device
-            .then(|| parse_number(&self.header[337..345]))
-            .flatten();
-        if has_device && (device_major.is_none() || device_minor.is_none()) {
-            return Err(ArchiveError::InvalidMetadata);
-        }
+        let number = |range| parse_number(&self.header[range]).ok_or(ArchiveError::InvalidMetadata);
+        let (device_major, device_minor) = match kind {
+            EntryKind::CharacterDevice | EntryKind::BlockDevice => {
+                (Some(number(329..337)?), Some(number(337..345)?))
+            }
+            _ => (None, None),
+        };
         let link_target = matches!(kind, EntryKind::HardLink | EntryKind::SymbolicLink)
             .then_some(&self.link[..self.link_len]);
         sink.begin_entry(Entry {
             path: &self.path[..self.path_len],
             kind,
             size,
-            mode,
-            uid,
-            gid,
-            mtime,
+            mode: number(100..108)?,
+            uid: number(108..116)?,
+            gid: number(116..124)?,
+            mtime: number(136..148)?,
             link_target,
             device_major,
             device_minor,
-            pax: if self.pending_pax {
-                &self.pax[..self.pax_len]
-            } else {
-                &[]
-            },
+            pax,
         })
         .map_err(ArchiveError::Sink)?;
         self.entry_open = true;
@@ -836,6 +729,36 @@ impl<'a> Archive<'a> {
             self.finish_content(sink)?;
         }
         Ok(())
+    }
+
+    fn start_extension<S: LayerEventSink>(
+        &mut self,
+        type_flag: u8,
+        size: u64,
+        sink: &mut S,
+    ) -> Result<bool, ArchiveError<S::Error>> {
+        self.current = match type_flag {
+            b'L' => {
+                self.path_len = 0;
+                ArchiveEntry::LongPath
+            }
+            b'K' => {
+                self.link_len = 0;
+                ArchiveEntry::LongLink
+            }
+            b'x' => {
+                self.pax_len = 0;
+                ArchiveEntry::Pax
+            }
+            b'g' => return Err(ArchiveError::UnsupportedGlobalPax),
+            _ => return Ok(false),
+        };
+        self.entry_remaining = size;
+        self.padding_remaining = padding_for(size);
+        if size == 0 {
+            self.finish_content(sink)?;
+        }
+        Ok(true)
     }
 
     fn finish_content<S: LayerEventSink>(
@@ -877,77 +800,49 @@ pub enum Scratch {
     Pax,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, derive_more::Display, derive_more::From)]
 pub enum ArchiveError<E> {
+    #[display("invalid tar header checksum")]
     InvalidChecksum,
+    #[display("invalid tar entry size")]
     InvalidSize,
+    #[display("invalid tar entry metadata")]
     InvalidMetadata,
+    #[display("invalid tar end marker")]
     InvalidEndMarker,
+    #[display("unsafe or invalid tar path")]
     InvalidPath,
+    #[display("unsafe tar link target")]
     InvalidLink,
+    #[display("invalid OCI whiteout entry")]
     InvalidWhiteout,
+    #[display("invalid PAX header: {_0}")]
+    #[from]
     InvalidPax(PaxError),
+    #[display("global PAX headers are not supported")]
     UnsupportedGlobalPax,
+    #[display("{_0:?} buffer is too small")]
     BufferTooSmall(Scratch),
+    #[display("invalid tar parser state")]
     InvalidState,
+    #[display("layer sink failed: {_0}")]
     Sink(E),
 }
 
-impl<E: fmt::Display> fmt::Display for ArchiveError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidChecksum => formatter.write_str("invalid tar header checksum"),
-            Self::InvalidSize => formatter.write_str("invalid tar entry size"),
-            Self::InvalidMetadata => formatter.write_str("invalid tar entry metadata"),
-            Self::InvalidEndMarker => formatter.write_str("invalid tar end marker"),
-            Self::InvalidPath => formatter.write_str("unsafe or invalid tar path"),
-            Self::InvalidLink => formatter.write_str("unsafe tar link target"),
-            Self::InvalidWhiteout => formatter.write_str("invalid OCI whiteout entry"),
-            Self::InvalidPax(error) => write!(formatter, "invalid PAX header: {error}"),
-            Self::UnsupportedGlobalPax => {
-                formatter.write_str("global PAX headers are not supported")
-            }
-            Self::BufferTooSmall(buffer) => write!(formatter, "{buffer:?} buffer is too small"),
-            Self::InvalidState => formatter.write_str("invalid tar parser state"),
-            Self::Sink(error) => write!(formatter, "layer sink failed: {error}"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum ArchiveFinishError {
+    #[display("unexpected end of tar archive")]
     UnexpectedEof,
+    #[display("tar archive ended after an extension header")]
     DanglingExtension,
 }
 
-impl fmt::Display for ArchiveFinishError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::UnexpectedEof => "unexpected end of tar archive",
-            Self::DanglingExtension => "tar archive ended after an extension header",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum PaxError {
+    #[display("invalid record length")]
     InvalidLength,
+    #[display("invalid key/value record")]
     InvalidRecord,
-}
-
-impl fmt::Display for PaxError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidLength => "invalid record length",
-            Self::InvalidRecord => "invalid key/value record",
-        })
-    }
-}
-
-impl<E> From<PaxError> for ArchiveError<E> {
-    fn from(error: PaxError) -> Self {
-        Self::InvalidPax(error)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -997,15 +892,8 @@ fn append_scratch<E>(
     bytes: &[u8],
     kind: Scratch,
 ) -> Result<(), ArchiveError<E>> {
-    let end = length
-        .checked_add(bytes.len())
-        .ok_or(ArchiveError::BufferTooSmall(kind))?;
-    let output = destination
-        .get_mut(*length..end)
-        .ok_or(ArchiveError::BufferTooSmall(kind))?;
-    output.copy_from_slice(bytes);
-    *length = end;
-    Ok(())
+    crate::buffer::append(destination, length, bytes)
+        .map_err(|_| ArchiveError::BufferTooSmall(kind))
 }
 
 fn copy_scratch<E>(
@@ -1033,26 +921,23 @@ fn normalize_path<E>(bytes: &mut [u8], length: usize) -> Result<usize, ArchiveEr
     let mut read = 0;
     let mut write = 0;
     while read < length {
-        while read < length && bytes[read] == b'/' {
-            read += 1;
-        }
         let start = read;
-        while read < length && bytes[read] != b'/' {
-            read += 1;
-        }
-        let component_len = read - start;
-        if component_len == 0 || &bytes[start..read] == b"." {
-            continue;
-        }
-        if &bytes[start..read] == b".." {
-            return Err(ArchiveError::InvalidPath);
+        let end = bytes[start..length]
+            .iter()
+            .position(|byte| *byte == b'/')
+            .map_or(length, |offset| start + offset);
+        read = end + 1;
+        match &bytes[start..end] {
+            b"" | b"." => continue,
+            b".." => return Err(ArchiveError::InvalidPath),
+            _ => {}
         }
         if write != 0 {
             bytes[write] = b'/';
             write += 1;
         }
-        bytes.copy_within(start..read, write);
-        write += component_len;
+        bytes.copy_within(start..end, write);
+        write += end - start;
     }
     if write == 0 {
         bytes[0] = b'.';
@@ -1109,31 +994,31 @@ fn validate_pax<E>(bytes: &[u8]) -> Result<(), ArchiveError<E>> {
     Ok(())
 }
 
-fn pax_value<'a, E>(bytes: &'a [u8], key: &[u8]) -> Result<Option<&'a [u8]>, ArchiveError<E>> {
-    let mut found = None;
+fn pax_overrides<E>(bytes: &[u8]) -> Result<[Option<&[u8]>; 3], ArchiveError<E>> {
+    let mut values = [None; 3];
     for record in PaxRecords::new(bytes) {
         let record = record?;
-        if record.key == key {
-            if found.is_some() {
-                return Err(ArchiveError::InvalidPax(PaxError::InvalidRecord));
-            }
-            found = Some(record.value);
+        let index = match record.key {
+            b"size" => 0,
+            b"path" => 1,
+            b"linkpath" => 2,
+            _ => continue,
+        };
+        if values[index].replace(record.value).is_some() {
+            return Err(ArchiveError::InvalidPax(PaxError::InvalidRecord));
         }
     }
-    Ok(found)
+    Ok(values)
 }
 
-fn parse_pax_record(bytes: &[u8], position: usize) -> Result<(PaxRecord<'_>, usize), PaxError> {
-    let space = bytes[position..]
+fn parse_pax_record(bytes: &[u8]) -> Result<(PaxRecord<'_>, usize), PaxError> {
+    let space = bytes
         .iter()
         .position(|byte| *byte == b' ')
-        .map(|offset| position + offset)
         .ok_or(PaxError::InvalidLength)?;
-    let length = decimal(&bytes[position..space]).ok_or(PaxError::InvalidLength)?;
+    let length = decimal(&bytes[..space]).ok_or(PaxError::InvalidLength)?;
     let length = usize::try_from(length).map_err(|_| PaxError::InvalidLength)?;
-    let end = position
-        .checked_add(length)
-        .ok_or(PaxError::InvalidLength)?;
+    let end = length;
     let record = bytes.get(space + 1..end).ok_or(PaxError::InvalidLength)?;
     let record = record.strip_suffix(b"\n").ok_or(PaxError::InvalidRecord)?;
     let equals = record
@@ -1153,22 +1038,18 @@ fn parse_pax_record(bytes: &[u8], position: usize) -> Result<(PaxRecord<'_>, usi
 }
 
 fn decimal(bytes: &[u8]) -> Option<u64> {
-    if bytes.is_empty() {
+    if !bytes.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    bytes.iter().try_fold(0u64, |value, byte| {
-        value.checked_mul(10)?.checked_add(u64::from(
-            byte.checked_sub(b'0').filter(|digit| *digit <= 9)?,
-        ))
-    })
+    core::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        header_path, normalize_path, validate_pax, validate_symbolic_link, Archive, ArchiveBuffers,
-        ArchiveError, Entry, EntryExtractor, EntryKind, ExtractError, FinishError, LayerEventSink,
-        TarWriteError, TarWriter, BLOCK_SIZE,
+        header_path, normalize_path, pax_overrides, validate_pax, validate_symbolic_link, Archive,
+        ArchiveBuffers, ArchiveError, Entry, EntryExtractor, EntryKind, ExtractError, FinishError,
+        LayerEventSink, PaxError, TarWriteError, TarWriter, BLOCK_SIZE,
     };
     use std::{format, string::ToString, vec::Vec};
 
@@ -1427,6 +1308,17 @@ mod tests {
     #[test]
     fn rejects_malformed_pax_records() {
         assert!(validate_pax::<()>(b"garbage").is_err());
+        for key in ["size", "path", "linkpath"] {
+            let duplicate = pax_record(key, "first").repeat(2);
+            assert_eq!(
+                pax_overrides::<()>(&duplicate),
+                Err(ArchiveError::InvalidPax(PaxError::InvalidRecord))
+            );
+        }
+        assert_eq!(
+            pax_overrides::<()>(&pax_record("vendor.key", "value").repeat(2)),
+            Ok([None; 3])
+        );
     }
 
     #[test]

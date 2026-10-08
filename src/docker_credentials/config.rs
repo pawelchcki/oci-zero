@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64ct::{Base64, Encoding};
 use serde::Deserialize;
 use std::{collections::HashMap, string::String};
 
@@ -104,9 +104,7 @@ fn decode_auth(
     if auth.auth.is_empty() {
         return Ok(None);
     }
-    let decoded = STANDARD
-        .decode(auth.auth.as_bytes())
-        .map_err(|_| invalid_auth(server))?;
+    let decoded = Base64::decode_vec(&auth.auth).map_err(|_| invalid_auth(server))?;
     let decoded = String::from_utf8(decoded).map_err(|_| invalid_auth(server))?;
     let (username, secret) = decoded
         .split_once(':')

@@ -30,8 +30,7 @@ where
     if target.scheme != Scheme::Https {
         return Err(ConnectError::HttpsRequired);
     }
-    let (host, port) =
-        crate::reqwless::authority(target).map_err(|_| ConnectError::InvalidAuthority)?;
+    let (host, port) = crate::reqwless::authority(target).ok_or(ConnectError::InvalidAuthority)?;
     if server_name.to_bytes() != host.as_bytes() {
         return Err(ConnectError::ServerNameMismatch);
     }
@@ -60,34 +59,20 @@ where
     Ok(session)
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum ConnectError {
+    #[display("DNS lookup failed")]
     Dns,
+    #[display("network operation failed: {_0:?}")]
     Network(ErrorKind),
+    #[display("TLS operation failed: {_0}")]
     Tls(SessionError),
+    #[display("TLS certificate verification failed: {_0:#x}")]
     Verification(u32),
+    #[display("invalid HTTPS authority")]
     InvalidAuthority,
+    #[display("MbedTLS connector requires HTTPS")]
     HttpsRequired,
+    #[display("TLS server name does not match request authority")]
     ServerNameMismatch,
-}
-
-impl core::fmt::Display for ConnectError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Dns => formatter.write_str("DNS lookup failed"),
-            Self::Network(error) => write!(formatter, "network operation failed: {error:?}"),
-            Self::Tls(error) => write!(formatter, "TLS operation failed: {error}"),
-            Self::Verification(details) => {
-                write!(
-                    formatter,
-                    "TLS certificate verification failed: {details:#x}"
-                )
-            }
-            Self::InvalidAuthority => formatter.write_str("invalid HTTPS authority"),
-            Self::HttpsRequired => formatter.write_str("MbedTLS connector requires HTTPS"),
-            Self::ServerNameMismatch => {
-                formatter.write_str("TLS server name does not match request authority")
-            }
-        }
-    }
 }

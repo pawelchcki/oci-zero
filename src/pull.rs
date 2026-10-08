@@ -1,7 +1,5 @@
 //! Callback-driven, allocation-free OCI graph traversal.
 
-use core::fmt;
-
 use crate::{
     digest::Digest,
     metadata::{Descriptor, Document, DocumentKind, ImageConfig, ImageIndex, ImageManifest},
@@ -293,16 +291,7 @@ impl<'a> BufferSink<'a> {
 
 impl BlobSink for BufferSink<'_> {
     fn chunk(&mut self, bytes: &[u8]) {
-        let Some(end) = self.length.checked_add(bytes.len()) else {
-            self.overflow = true;
-            return;
-        };
-        let Some(output) = self.buffer.get_mut(self.length..end) else {
-            self.overflow = true;
-            return;
-        };
-        output.copy_from_slice(bytes);
-        self.length = end;
+        self.overflow |= crate::buffer::append(self.buffer, &mut self.length, bytes).is_err();
     }
 
     fn cancelled(&self) -> bool {
@@ -328,31 +317,24 @@ impl<V: PullVisitor> BlobSink for VisitorSink<'_, V> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum PullError<F, V> {
+    #[display("registry fetch failed: {_0}")]
     Fetch(F),
+    #[display("pull visitor failed: {_0}")]
     Visitor(V),
+    #[display("OCI metadata failed: {_0}")]
     Metadata(crate::metadata::MetadataError),
+    #[display("image config exceeds its caller buffer")]
     ConfigTooLarge,
+    #[display("image config is missing rootfs.diff_ids")]
     MissingDiffIds,
+    #[display("layer and diff_id counts differ")]
     DiffIdCount,
+    #[display("nested OCI indexes exceed this pull frame")]
     NestedIndex,
+    #[display("fetcher returned an out-of-range length")]
     BufferContract,
-}
-
-impl<F: fmt::Display, V: fmt::Display> fmt::Display for PullError<F, V> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Fetch(error) => write!(formatter, "registry fetch failed: {error}"),
-            Self::Visitor(error) => write!(formatter, "pull visitor failed: {error}"),
-            Self::Metadata(error) => write!(formatter, "OCI metadata failed: {error}"),
-            Self::ConfigTooLarge => formatter.write_str("image config exceeds its caller buffer"),
-            Self::MissingDiffIds => formatter.write_str("image config is missing rootfs.diff_ids"),
-            Self::DiffIdCount => formatter.write_str("layer and diff_id counts differ"),
-            Self::NestedIndex => formatter.write_str("nested OCI indexes exceed this pull frame"),
-            Self::BufferContract => formatter.write_str("fetcher returned an out-of-range length"),
-        }
-    }
 }
 
 #[cfg(test)]

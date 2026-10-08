@@ -27,7 +27,6 @@ pub(crate) struct Table<'a> {
     entries: &'a mut [Entry],
     len: usize,
     log: u8,
-    valid: bool,
 }
 
 impl<'a> Table<'a> {
@@ -36,18 +35,16 @@ impl<'a> Table<'a> {
             entries,
             len: 0,
             log: 0,
-            valid: false,
         }
     }
 
     pub(crate) fn reset(&mut self) {
         self.len = 0;
         self.log = 0;
-        self.valid = false;
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        self.valid
+        self.len != 0
     }
 
     pub(crate) fn log(&self) -> u8 {
@@ -69,7 +66,7 @@ impl<'a> Table<'a> {
     }
 
     pub(crate) fn entry(&self, state: u32) -> Result<Entry, DecodeError> {
-        if !self.valid || state as usize >= self.len {
+        if state as usize >= self.len {
             return Err(DecodeError::InvalidEntropyTable);
         }
         Ok(self.entries[state as usize])
@@ -83,7 +80,6 @@ impl<'a> Table<'a> {
         };
         self.len = 1;
         self.log = 0;
-        self.valid = true;
     }
 
     pub(crate) fn build(
@@ -120,18 +116,12 @@ impl<'a> Table<'a> {
         }
 
         let table_size = 1usize << table_log;
-        let mut total = 0usize;
-        for probability in probabilities.iter() {
-            total = total
-                .checked_add(if *probability == -1 {
-                    1
-                } else if *probability > 0 {
-                    *probability as usize
-                } else {
-                    0
-                })
-                .ok_or(DecodeError::ArithmeticOverflow)?;
-        }
+        // At most 256 i16 counts sum to less than 2^23, fitting usize on
+        // every target capable of representing the decoder's 128 KiB block.
+        let total: usize = probabilities
+            .iter()
+            .map(|p| normalized_count(*p) as usize)
+            .sum();
         if total != table_size {
             return Err(DecodeError::InvalidEntropyTable);
         }
@@ -140,9 +130,8 @@ impl<'a> Table<'a> {
         let mut high = table_size;
         for (symbol, probability) in probabilities.iter().enumerate() {
             if *probability == -1 {
-                high = high
-                    .checked_sub(1)
-                    .ok_or(DecodeError::InvalidEntropyTable)?;
+                // The validated total bounds the number of low-probability slots.
+                high -= 1;
                 self.entries[high].symbol = symbol as u8;
             }
         }
@@ -172,10 +161,7 @@ impl<'a> Table<'a> {
         // Symbol spreading no longer needs the probabilities. Reuse their
         // storage for next-state counters (at most twice the 512-entry table).
         for probability in probabilities.iter_mut() {
-            *probability = match *probability {
-                -1 => 1,
-                value => value.max(0),
-            };
+            *probability = normalized_count(*probability);
         }
         let next = probabilities;
         for entry in &mut self.entries[..table_size] {
@@ -191,14 +177,12 @@ impl<'a> Table<'a> {
             let floor_log = (u16::BITS - 1 - state.leading_zeros()) as u8;
             let bits = table_log - floor_log;
             entry.bits = bits;
-            entry.baseline = ((state as u32) << bits)
-                .checked_sub(table_size as u32)
-                .ok_or(DecodeError::InvalidEntropyTable)? as u16;
+            // state >= 2^floor_log, hence state << bits >= table_size.
+            entry.baseline = (((state as u32) << bits) - table_size as u32) as u16;
         }
 
         self.len = table_size;
         self.log = table_log;
-        self.valid = true;
         Ok(())
     }
 
@@ -268,6 +252,13 @@ impl<'a> Table<'a> {
         }
         self.build_in_place(&mut probabilities[..symbols], table_log)?;
         Ok(bits.position().div_ceil(8))
+    }
+}
+
+fn normalized_count(probability: i16) -> i16 {
+    match probability {
+        -1 => 1,
+        value => value.max(0),
     }
 }
 

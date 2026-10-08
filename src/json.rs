@@ -1,4 +1,4 @@
-use core::{char, fmt, str};
+use core::{char, str};
 
 const MAX_DEPTH: usize = 64;
 
@@ -29,25 +29,13 @@ impl<'a> JsonString<'a> {
             return str::from_utf8(destination).map_err(|_| JsonError::InvalidUtf8);
         }
 
-        let source = self.encoded.as_bytes();
-        let mut input = 0;
         let mut output = 0;
-        while input < source.len() {
-            if source[input] != b'\\' {
-                let start = input;
-                while input < source.len() && source[input] != b'\\' {
-                    input += 1;
-                }
-                copy_decoded(buffer, &mut output, &source[start..input])?;
-                continue;
-            }
-            let (character, next) = escaped_character(source, input)?;
-            input = next;
+        for character in self.decoded_chars() {
             let mut encoded = [0; 4];
             copy_decoded(
                 buffer,
                 &mut output,
-                character.encode_utf8(&mut encoded).as_bytes(),
+                character?.encode_utf8(&mut encoded).as_bytes(),
             )?;
         }
         str::from_utf8(&buffer[..output]).map_err(|_| JsonError::InvalidUtf8)
@@ -60,59 +48,47 @@ impl<'a> JsonString<'a> {
         if !self.escaped {
             return self.encoded == expected;
         }
-        let source = self.encoded.as_bytes();
-        let expected = expected.as_bytes();
-        let mut input = 0;
-        let mut output = 0;
-        while input < source.len() {
-            if source[input] == b'\\' {
-                let Ok((character, next)) = escaped_character(source, input) else {
-                    return false;
-                };
-                if !character.is_ascii() || expected.get(output).copied() != Some(character as u8) {
-                    return false;
-                }
-                input = next;
-                output += 1;
+        self.decoded_chars().eq(expected.chars().map(Ok))
+    }
+
+    fn decoded_chars(&self) -> impl Iterator<Item = Result<char, JsonError>> + '_ {
+        let mut source = self.encoded;
+        core::iter::from_fn(move || {
+            let first = source.chars().next()?;
+            let result = if first == '\\' {
+                escaped_character(source.as_bytes(), 0)
             } else {
-                if expected.get(output).copied() != Some(source[input]) {
-                    return false;
-                }
-                input += 1;
-                output += 1;
-            }
-        }
-        output == expected.len()
+                Ok((first, first.len_utf8()))
+            };
+            source = match result {
+                Ok((_, length)) => &source[length..],
+                Err(_) => "",
+            };
+            Some(result.map(|(character, _)| character))
+        })
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display)]
 pub enum JsonError {
+    #[display("JSON is not UTF-8")]
     InvalidUtf8,
+    #[display("invalid JSON syntax")]
     InvalidSyntax,
+    #[display("JSON nesting is too deep")]
     NestingTooDeep,
+    #[display("invalid JSON string escape")]
     InvalidEscape,
+    #[display("invalid JSON number")]
     InvalidNumber,
+    #[display("unexpected JSON value type")]
     WrongType,
+    #[display("missing JSON field {_0}")]
     MissingField(&'static str),
+    #[display("duplicate JSON field {_0}")]
     DuplicateField(&'static str),
+    #[display("JSON string output buffer is too small")]
     BufferTooSmall,
-}
-
-impl fmt::Display for JsonError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidUtf8 => formatter.write_str("JSON is not UTF-8"),
-            Self::InvalidSyntax => formatter.write_str("invalid JSON syntax"),
-            Self::NestingTooDeep => formatter.write_str("JSON nesting is too deep"),
-            Self::InvalidEscape => formatter.write_str("invalid JSON string escape"),
-            Self::InvalidNumber => formatter.write_str("invalid JSON number"),
-            Self::WrongType => formatter.write_str("unexpected JSON value type"),
-            Self::MissingField(field) => write!(formatter, "missing JSON field {field}"),
-            Self::DuplicateField(field) => write!(formatter, "duplicate JSON field {field}"),
-            Self::BufferTooSmall => formatter.write_str("JSON string output buffer is too small"),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,72 +173,20 @@ impl<'a> Object<'a> {
     }
 
     pub(crate) fn iter(self) -> ObjectIter<'a> {
-        ObjectIter {
-            bytes: self.bytes,
-            position: 1,
-            first: true,
-            finished: false,
-        }
+        ObjectIter(Container::new(self.bytes, 0, b'}'))
     }
 }
 
-pub(crate) struct ObjectIter<'a> {
-    bytes: &'a [u8],
-    position: usize,
-    first: bool,
-    finished: bool,
-}
+pub(crate) struct ObjectIter<'a>(Container<'a>);
 
 impl<'a> Iterator for ObjectIter<'a> {
     type Item = Result<(JsonString<'a>, Value<'a>), JsonError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
-        let result = self.next_inner();
-        if result.is_err() {
-            self.finished = true;
-        }
-        result.transpose()
-    }
-}
-
-impl<'a> ObjectIter<'a> {
-    fn next_inner(&mut self) -> Result<Option<(JsonString<'a>, Value<'a>)>, JsonError> {
-        self.position = whitespace(self.bytes, self.position);
-        if self.bytes.get(self.position) == Some(&b'}') {
-            self.finished = true;
-            return Ok(None);
-        }
-        if !self.first {
-            if self.bytes.get(self.position) != Some(&b',') {
-                return Err(JsonError::InvalidSyntax);
-            }
-            self.position = whitespace(self.bytes, self.position + 1);
-        }
-        self.first = false;
-        if self.bytes.get(self.position) != Some(&b'"') {
-            return Err(JsonError::InvalidSyntax);
-        }
-        let key_end = parse_string(self.bytes, self.position)?;
-        let key = Value {
-            bytes: &self.bytes[self.position..key_end],
-        }
-        .string()?;
-        self.position = whitespace(self.bytes, key_end);
-        if self.bytes.get(self.position) != Some(&b':') {
-            return Err(JsonError::InvalidSyntax);
-        }
-        let start = whitespace(self.bytes, self.position + 1);
-        let end = parse_value(self.bytes, start, 0)?;
-        self.position = end;
-        Ok(Some((
-            key,
-            Value {
-                bytes: &self.bytes[start..end],
-            },
-        )))
+        self.0.next(0).map(|member| {
+            let (key, value) = member?;
+            Ok((key.expect("object member has a key"), value))
+        })
     }
 }
 
@@ -273,57 +197,89 @@ pub(crate) struct Array<'a> {
 
 impl<'a> Array<'a> {
     pub(crate) fn iter(self) -> ArrayIter<'a> {
-        ArrayIter {
-            bytes: self.bytes,
-            position: 1,
-            first: true,
-            finished: false,
-        }
+        ArrayIter(Container::new(self.bytes, 0, b']'))
     }
 }
 
-pub(crate) struct ArrayIter<'a> {
-    bytes: &'a [u8],
-    position: usize,
-    first: bool,
-    finished: bool,
-}
+pub(crate) struct ArrayIter<'a>(Container<'a>);
 
 impl<'a> Iterator for ArrayIter<'a> {
     type Item = Result<Value<'a>, JsonError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.0.next(0).map(|member| member.map(|(_, value)| value))
+    }
+}
+
+/// Shared cursor for validating containers and iterating their borrowed values.
+struct Container<'a> {
+    bytes: &'a [u8],
+    closing: u8,
+    first: bool,
+    finished: bool,
+}
+
+type Member<'a> = (Option<JsonString<'a>>, Value<'a>);
+
+impl<'a> Container<'a> {
+    fn new(bytes: &'a [u8], opening: usize, closing: u8) -> Self {
+        Self {
+            bytes: &bytes[opening + 1..],
+            closing,
+            first: true,
+            finished: false,
+        }
+    }
+
+    fn next(&mut self, depth: usize) -> Option<Result<Member<'a>, JsonError>> {
         if self.finished {
             return None;
         }
-        let result = self.next_inner();
+        let result = self.next_inner(depth);
         if result.is_err() {
             self.finished = true;
         }
         result.transpose()
     }
-}
 
-impl<'a> ArrayIter<'a> {
-    fn next_inner(&mut self) -> Result<Option<Value<'a>>, JsonError> {
-        self.position = whitespace(self.bytes, self.position);
-        if self.bytes.get(self.position) == Some(&b']') {
+    fn next_inner(&mut self, depth: usize) -> Result<Option<Member<'a>>, JsonError> {
+        self.bytes = &self.bytes[whitespace(self.bytes, 0)..];
+        if self.bytes.first() == Some(&self.closing) {
+            self.bytes = &self.bytes[1..];
             self.finished = true;
             return Ok(None);
         }
         if !self.first {
-            if self.bytes.get(self.position) != Some(&b',') {
+            if self.bytes.first() != Some(&b',') {
                 return Err(JsonError::InvalidSyntax);
             }
-            self.position = whitespace(self.bytes, self.position + 1);
+            self.bytes = &self.bytes[whitespace(self.bytes, 1)..];
         }
         self.first = false;
-        let start = self.position;
-        let end = parse_value(self.bytes, start, 0)?;
-        self.position = end;
-        Ok(Some(Value {
-            bytes: &self.bytes[start..end],
-        }))
+        let key = if self.closing == b'}' {
+            if self.bytes.first() != Some(&b'"') {
+                return Err(JsonError::InvalidSyntax);
+            }
+            let end = parse_string(self.bytes, 0)?;
+            let key = Value {
+                bytes: &self.bytes[..end],
+            }
+            .string()?;
+            self.bytes = &self.bytes[whitespace(self.bytes, end)..];
+            if self.bytes.first() != Some(&b':') {
+                return Err(JsonError::InvalidSyntax);
+            }
+            self.bytes = &self.bytes[whitespace(self.bytes, 1)..];
+            Some(key)
+        } else {
+            None
+        };
+        let end = parse_value(self.bytes, 0, depth)?;
+        let value = Value {
+            bytes: &self.bytes[..end],
+        };
+        self.bytes = &self.bytes[end..];
+        Ok(Some((key, value)))
     }
 }
 
@@ -333,8 +289,8 @@ fn parse_value(bytes: &[u8], position: usize, depth: usize) -> Result<usize, Jso
     }
     match bytes.get(position).copied() {
         Some(b'"') => parse_string(bytes, position),
-        Some(b'{') => parse_object(bytes, position, depth + 1),
-        Some(b'[') => parse_array(bytes, position, depth + 1),
+        Some(b'{') => parse_container(bytes, position, b'}', depth + 1),
+        Some(b'[') => parse_container(bytes, position, b']', depth + 1),
         Some(b't') => literal(bytes, position, b"true"),
         Some(b'f') => literal(bytes, position, b"false"),
         Some(b'n') => literal(bytes, position, b"null"),
@@ -343,44 +299,17 @@ fn parse_value(bytes: &[u8], position: usize, depth: usize) -> Result<usize, Jso
     }
 }
 
-fn parse_object(bytes: &[u8], mut position: usize, depth: usize) -> Result<usize, JsonError> {
-    position = whitespace(bytes, position + 1);
-    if bytes.get(position) == Some(&b'}') {
-        return Ok(position + 1);
+fn parse_container(
+    bytes: &[u8],
+    position: usize,
+    closing: u8,
+    depth: usize,
+) -> Result<usize, JsonError> {
+    let mut container = Container::new(bytes, position, closing);
+    while let Some(member) = container.next(depth) {
+        member?;
     }
-    loop {
-        if bytes.get(position) != Some(&b'"') {
-            return Err(JsonError::InvalidSyntax);
-        }
-        position = whitespace(bytes, parse_string(bytes, position)?);
-        if bytes.get(position) != Some(&b':') {
-            return Err(JsonError::InvalidSyntax);
-        }
-        position = whitespace(
-            bytes,
-            parse_value(bytes, whitespace(bytes, position + 1), depth)?,
-        );
-        match bytes.get(position) {
-            Some(b'}') => return Ok(position + 1),
-            Some(b',') => position = whitespace(bytes, position + 1),
-            _ => return Err(JsonError::InvalidSyntax),
-        }
-    }
-}
-
-fn parse_array(bytes: &[u8], mut position: usize, depth: usize) -> Result<usize, JsonError> {
-    position = whitespace(bytes, position + 1);
-    if bytes.get(position) == Some(&b']') {
-        return Ok(position + 1);
-    }
-    loop {
-        position = whitespace(bytes, parse_value(bytes, position, depth)?);
-        match bytes.get(position) {
-            Some(b']') => return Ok(position + 1),
-            Some(b',') => position = whitespace(bytes, position + 1),
-            _ => return Err(JsonError::InvalidSyntax),
-        }
-    }
+    Ok(bytes.len() - container.bytes.len())
 }
 
 fn parse_string(bytes: &[u8], position: usize) -> Result<usize, JsonError> {
@@ -400,39 +329,40 @@ fn parse_string(bytes: &[u8], position: usize) -> Result<usize, JsonError> {
 }
 
 fn escaped_character(bytes: &[u8], slash: usize) -> Result<(char, usize), JsonError> {
-    match bytes.get(slash + 1).copied() {
-        Some(b'"') => Ok(('"', slash + 2)),
-        Some(b'\\') => Ok(('\\', slash + 2)),
-        Some(b'/') => Ok(('/', slash + 2)),
-        Some(b'b') => Ok(('\u{0008}', slash + 2)),
-        Some(b'f') => Ok(('\u{000c}', slash + 2)),
-        Some(b'n') => Ok(('\n', slash + 2)),
-        Some(b'r') => Ok(('\r', slash + 2)),
-        Some(b't') => Ok(('\t', slash + 2)),
-        Some(b'u') => {
-            let first = unicode_escape(bytes, slash + 2)?;
-            let next = slash + 6;
-            let scalar = if (0xd800..=0xdbff).contains(&first) {
-                if bytes.get(next..next + 2) != Some(b"\\u") {
-                    return Err(JsonError::InvalidEscape);
-                }
-                let second = unicode_escape(bytes, next + 2)?;
-                if !(0xdc00..=0xdfff).contains(&second) {
-                    return Err(JsonError::InvalidEscape);
-                }
-                let high = u32::from(first - 0xd800);
-                let low = u32::from(second - 0xdc00);
-                (0x10000 + (high << 10) + low, next + 6)
-            } else if (0xdc00..=0xdfff).contains(&first) {
-                return Err(JsonError::InvalidEscape);
-            } else {
-                (u32::from(first), next)
-            };
-            let character = char::from_u32(scalar.0).ok_or(JsonError::InvalidEscape)?;
-            Ok((character, scalar.1))
+    let character = match bytes.get(slash + 1).copied() {
+        Some(value @ (b'"' | b'\\' | b'/')) => char::from(value),
+        Some(b'b') => '\u{0008}',
+        Some(b'f') => '\u{000c}',
+        Some(b'n') => '\n',
+        Some(b'r') => '\r',
+        Some(b't') => '\t',
+        Some(b'u') => return unicode_character(bytes, slash + 2),
+        _ => return Err(JsonError::InvalidEscape),
+    };
+    Ok((character, slash + 2))
+}
+
+fn unicode_character(bytes: &[u8], start: usize) -> Result<(char, usize), JsonError> {
+    let first = unicode_escape(bytes, start)?;
+    let next = start + 4;
+    let scalar = if (0xd800..=0xdbff).contains(&first) {
+        if bytes.get(next..next + 2) != Some(b"\\u") {
+            return Err(JsonError::InvalidEscape);
         }
-        _ => Err(JsonError::InvalidEscape),
-    }
+        let second = unicode_escape(bytes, next + 2)?;
+        if !(0xdc00..=0xdfff).contains(&second) {
+            return Err(JsonError::InvalidEscape);
+        }
+        let high = u32::from(first - 0xd800);
+        let low = u32::from(second - 0xdc00);
+        (0x10000 + (high << 10) + low, next + 6)
+    } else if (0xdc00..=0xdfff).contains(&first) {
+        return Err(JsonError::InvalidEscape);
+    } else {
+        (u32::from(first), next)
+    };
+    let character = char::from_u32(scalar.0).ok_or(JsonError::InvalidEscape)?;
+    Ok((character, scalar.1))
 }
 
 fn unicode_escape(bytes: &[u8], start: usize) -> Result<u16, JsonError> {
@@ -441,10 +371,8 @@ fn unicode_escape(bytes: &[u8], start: usize) -> Result<u16, JsonError> {
         .ok_or(JsonError::InvalidEscape)?;
     let mut value = 0u16;
     for digit in digits {
-        value = value
-            .checked_mul(16)
-            .and_then(|value| hex(*digit).map(|digit| value + u16::from(digit)))
-            .ok_or(JsonError::InvalidEscape)?;
+        // Exactly four hex digits fit in u16.
+        value = (value << 4) | u16::from(hex(*digit).ok_or(JsonError::InvalidEscape)?);
     }
     Ok(value)
 }
@@ -462,38 +390,31 @@ fn parse_number(bytes: &[u8], mut position: usize) -> Result<usize, JsonError> {
     if bytes.get(position) == Some(&b'-') {
         position += 1;
     }
-    match bytes.get(position) {
-        Some(b'0') => position += 1,
-        Some(b'1'..=b'9') => {
-            position += 1;
-            while matches!(bytes.get(position), Some(b'0'..=b'9')) {
-                position += 1;
-            }
-        }
+    position = match bytes.get(position) {
+        Some(b'0') => position + 1,
+        Some(b'1'..=b'9') => decimal_digits(bytes, position)?,
         _ => return Err(JsonError::InvalidNumber),
-    }
+    };
     if bytes.get(position) == Some(&b'.') {
-        position += 1;
-        let start = position;
-        while matches!(bytes.get(position), Some(b'0'..=b'9')) {
-            position += 1;
-        }
-        if position == start {
-            return Err(JsonError::InvalidNumber);
-        }
+        position = decimal_digits(bytes, position + 1)?;
     }
     if matches!(bytes.get(position), Some(b'e' | b'E')) {
         position += 1;
         if matches!(bytes.get(position), Some(b'+' | b'-')) {
             position += 1;
         }
-        let start = position;
-        while matches!(bytes.get(position), Some(b'0'..=b'9')) {
-            position += 1;
-        }
-        if position == start {
-            return Err(JsonError::InvalidNumber);
-        }
+        position = decimal_digits(bytes, position)?;
+    }
+    Ok(position)
+}
+
+fn decimal_digits(bytes: &[u8], start: usize) -> Result<usize, JsonError> {
+    let mut position = start;
+    while matches!(bytes.get(position), Some(b'0'..=b'9')) {
+        position += 1;
+    }
+    if position == start {
+        return Err(JsonError::InvalidNumber);
     }
     Ok(position)
 }
@@ -514,15 +435,7 @@ fn whitespace(bytes: &[u8], mut position: usize) -> usize {
 }
 
 fn copy_decoded(buffer: &mut [u8], output: &mut usize, bytes: &[u8]) -> Result<(), JsonError> {
-    let end = output
-        .checked_add(bytes.len())
-        .ok_or(JsonError::BufferTooSmall)?;
-    let destination = buffer
-        .get_mut(*output..end)
-        .ok_or(JsonError::BufferTooSmall)?;
-    destination.copy_from_slice(bytes);
-    *output = end;
-    Ok(())
+    crate::buffer::append(buffer, output, bytes).map_err(|_| JsonError::BufferTooSmall)
 }
 
 #[cfg(test)]
@@ -649,6 +562,39 @@ mod tests {
             0
         );
         assert!(Value::parse_document(b"false").is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_container_members_and_fuses_iterators() {
+        for bytes in [
+            b"[1,]".as_slice(),
+            b"[,1]",
+            b"[1 2]",
+            b"[1",
+            b"{a:1}",
+            b"{\"a\" 1}",
+            b"{\"a\":}",
+            b"{\"a\":1,}",
+            b"{\"a\":1 \"b\":2}",
+        ] {
+            assert_eq!(
+                Value::parse_document(bytes),
+                Err(JsonError::InvalidSyntax),
+                "{bytes:?}"
+            );
+        }
+        let mut array = Value { bytes: b"[1,]" }.array().unwrap().iter();
+        assert_eq!(array.next().unwrap().unwrap().u64(), Ok(1));
+        assert_eq!(array.next(), Some(Err(JsonError::InvalidSyntax)));
+        assert_eq!(array.next(), None);
+        let mut object = Value {
+            bytes: b"{\"a\" 1}",
+        }
+        .object()
+        .unwrap()
+        .iter();
+        assert_eq!(object.next(), Some(Err(JsonError::InvalidSyntax)));
+        assert_eq!(object.next(), None);
     }
 
     #[test]

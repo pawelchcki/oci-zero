@@ -1,7 +1,5 @@
 //! Allocation-free borrowed views over OCI JSON metadata.
 
-use core::fmt;
-
 pub use crate::json::{JsonError, JsonString};
 use crate::{
     digest::{Digest, DigestError},
@@ -369,90 +367,34 @@ impl<'a> Catalog<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, derive_more::Display, derive_more::From)]
 pub enum MetadataError {
+    #[display("invalid OCI JSON: {_0}")]
+    #[from]
     Json(JsonError),
+    #[display("invalid descriptor digest: {_0}")]
+    #[from]
     Digest(DigestError),
+    #[display("unsupported OCI schema version {_0}")]
     UnsupportedSchema(u64),
+    #[display("unknown OCI document shape")]
     UnknownDocument,
+    #[display("unexpected OCI document kind")]
     WrongDocumentKind,
+    #[display("invalid inline descriptor base64 data")]
     InvalidBase64,
 }
 
-impl fmt::Display for MetadataError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Json(error) => write!(formatter, "invalid OCI JSON: {error}"),
-            Self::Digest(error) => write!(formatter, "invalid descriptor digest: {error}"),
-            Self::UnsupportedSchema(schema) => {
-                write!(formatter, "unsupported OCI schema version {schema}")
-            }
-            Self::UnknownDocument => formatter.write_str("unknown OCI document shape"),
-            Self::WrongDocumentKind => formatter.write_str("unexpected OCI document kind"),
-            Self::InvalidBase64 => formatter.write_str("invalid inline descriptor base64 data"),
-        }
-    }
-}
-
 fn decode_base64_in_place(bytes: &mut [u8], encoded_length: usize) -> Result<usize, MetadataError> {
-    if encoded_length % 4 != 0 {
-        return Err(MetadataError::InvalidBase64);
+    use base64ct::{Base64, Encoding};
+    // The in-place decoder does not check unused bits in the final quartet.
+    if encoded_length >= 4 {
+        Base64::decode(&bytes[encoded_length - 4..encoded_length], &mut [0; 3])
+            .map_err(|_| MetadataError::InvalidBase64)?;
     }
-    let mut read = 0;
-    let mut write = 0;
-    while read < encoded_length {
-        let last = read + 4 == encoded_length;
-        let first = base64_value(bytes[read]).ok_or(MetadataError::InvalidBase64)?;
-        let second = base64_value(bytes[read + 1]).ok_or(MetadataError::InvalidBase64)?;
-        let third_padding = bytes[read + 2] == b'=';
-        let fourth_padding = bytes[read + 3] == b'=';
-        if third_padding {
-            if !last || !fourth_padding || second & 0x0f != 0 {
-                return Err(MetadataError::InvalidBase64);
-            }
-            bytes[write] = first << 2 | second >> 4;
-            write += 1;
-        } else {
-            let third = base64_value(bytes[read + 2]).ok_or(MetadataError::InvalidBase64)?;
-            bytes[write] = first << 2 | second >> 4;
-            bytes[write + 1] = second << 4 | third >> 2;
-            write += 2;
-            if fourth_padding {
-                if !last || third & 0x03 != 0 {
-                    return Err(MetadataError::InvalidBase64);
-                }
-            } else {
-                let fourth = base64_value(bytes[read + 3]).ok_or(MetadataError::InvalidBase64)?;
-                bytes[write] = third << 6 | fourth;
-                write += 1;
-            }
-        }
-        read += 4;
-    }
-    Ok(write)
-}
-
-const fn base64_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-impl From<JsonError> for MetadataError {
-    fn from(error: JsonError) -> Self {
-        Self::Json(error)
-    }
-}
-
-impl From<DigestError> for MetadataError {
-    fn from(error: DigestError) -> Self {
-        Self::Digest(error)
-    }
+    Base64::decode_in_place(&mut bytes[..encoded_length])
+        .map(|decoded| decoded.len())
+        .map_err(|_| MetadataError::InvalidBase64)
 }
 
 fn optional_string<'a>(

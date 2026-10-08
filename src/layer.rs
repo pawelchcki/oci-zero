@@ -1,7 +1,5 @@
 //! Verified, allocation-free OCI layer decoding.
 
-use core::fmt;
-
 use crate::{
     digest::{Digest, Verifier, VerifyError},
     tar::{
@@ -230,19 +228,12 @@ fn extract_output<E>(
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum EntryLayerError<E> {
+    #[display("entry layer failed: {_0}")]
     Layer(LayerError<ExtractError<E>>),
+    #[display("entry extraction failed: {_0}")]
     Finish(FinishError),
-}
-
-impl<E: fmt::Display> fmt::Display for EntryLayerError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Layer(error) => write!(formatter, "entry layer failed: {error}"),
-            Self::Finish(error) => write!(formatter, "entry extraction failed: {error}"),
-        }
-    }
 }
 
 /// Transactionally decodes, verifies, parses, and applies one OCI layer.
@@ -324,27 +315,20 @@ impl<'decoder, 'archive> LayerApplier<'decoder, 'archive> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum ApplyError<E> {
+    #[display("layer format error: {_0}")]
     Format(LayerFormatError),
+    #[display("layer integrity error: {_0}")]
     Integrity(VerifyError),
+    #[display("layer archive error: {_0}")]
     Archive(ArchiveError<E>),
+    #[display("layer archive error: {_0}")]
     ArchiveFinish(ArchiveFinishError),
+    #[display("layer sink failed: {_0}")]
     Sink(E),
+    #[display("invalid layer application state")]
     InvalidState,
-}
-
-impl<E: fmt::Display> fmt::Display for ApplyError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Format(error) => write!(formatter, "layer format error: {error}"),
-            Self::Integrity(error) => write!(formatter, "layer integrity error: {error}"),
-            Self::Archive(error) => write!(formatter, "layer archive error: {error}"),
-            Self::ArchiveFinish(error) => write!(formatter, "layer archive error: {error}"),
-            Self::Sink(error) => write!(formatter, "layer sink failed: {error}"),
-            Self::InvalidState => formatter.write_str("invalid layer application state"),
-        }
-    }
 }
 
 fn map_apply_error<E>(error: LayerError<ArchiveError<E>>) -> ApplyError<E> {
@@ -455,48 +439,30 @@ impl<'a> VerifiedDecoder<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum LayerError<E> {
+    #[display("layer format error: {_0}")]
     Format(LayerFormatError),
+    #[display("layer integrity error: {_0}")]
     Integrity(VerifyError),
+    #[display("layer output error: {_0}")]
     Output(E),
 }
 
-impl<E: fmt::Display> fmt::Display for LayerError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Format(error) => write!(formatter, "layer format error: {error}"),
-            Self::Integrity(error) => write!(formatter, "layer integrity error: {error}"),
-            Self::Output(error) => write!(formatter, "layer output error: {error}"),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum LayerFormatError {
+    #[display("unsupported OCI layer media type")]
     UnsupportedMediaType,
+    #[display("{_0:?} layer support is disabled")]
     EncodingDisabled(Encoding),
+    #[display("layer decoder stopped making progress")]
     DecoderStalled,
     #[cfg(feature = "gzip")]
+    #[display("{_0}")]
     Gzip(gzip_zero::DecodeError),
     #[cfg(feature = "zstd")]
+    #[display("{_0}")]
     Zstd(zstd_zero::DecodeError),
-}
-
-impl fmt::Display for LayerFormatError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedMediaType => formatter.write_str("unsupported OCI layer media type"),
-            Self::EncodingDisabled(encoding) => {
-                write!(formatter, "{encoding:?} layer support is disabled")
-            }
-            Self::DecoderStalled => formatter.write_str("layer decoder stopped making progress"),
-            #[cfg(feature = "gzip")]
-            Self::Gzip(error) => write!(formatter, "{error}"),
-            #[cfg(feature = "zstd")]
-            Self::Zstd(error) => write!(formatter, "{error}"),
-        }
-    }
 }
 
 #[cfg(test)]

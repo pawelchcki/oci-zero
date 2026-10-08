@@ -1,95 +1,39 @@
-use std::{
-    error::Error, ffi::OsString, fmt, io, path::PathBuf, process::ExitStatus, string::String,
-};
+use std::{error::Error, ffi::OsString, io, path::PathBuf, process::ExitStatus, string::String};
 
 /// Failure to read Docker configuration or obtain a configured credential.
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum DockerCredentialError {
-    ReadConfig {
-        path: PathBuf,
-        source: io::Error,
-    },
+    #[display("could not read Docker config at {}", path.display())]
+    ReadConfig { path: PathBuf, source: io::Error },
+    #[display("Docker config is not valid JSON")]
     ParseConfig(serde_json::Error),
+    #[display("DOCKER_AUTH_CONFIG is not valid Docker auth JSON")]
     ParseEnvironmentConfig(serde_json::Error),
+    #[display("DOCKER_AUTH_CONFIG is not valid Unicode")]
     EnvironmentNotUnicode,
-    InvalidAuth {
-        registry: String,
-    },
-    InvalidHelperName {
-        helper: String,
-    },
+    #[display("Docker auth entry for {registry} is invalid")]
+    InvalidAuth { registry: String },
+    #[display("Docker credential helper name {helper:?} is invalid")]
+    InvalidHelperName { helper: String },
+    #[display("could not run Docker credential helper {program:?}")]
     RunHelper {
         program: OsString,
         source: io::Error,
     },
-    MissingHelperInput {
-        program: OsString,
-    },
+    #[display("Docker credential helper {program:?} has no input pipe")]
+    MissingHelperInput { program: OsString },
+    #[display("Docker credential helper {program:?} failed with {status}")]
     HelperFailed {
         program: OsString,
         status: ExitStatus,
     },
+    #[display("Docker credential helper {program:?} returned invalid JSON")]
     InvalidHelperResponse {
         program: OsString,
         source: serde_json::Error,
     },
-    MissingHelperUsername {
-        program: OsString,
-    },
-}
-
-impl fmt::Display for DockerCredentialError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReadConfig { path, .. } => {
-                write!(
-                    formatter,
-                    "could not read Docker config at {}",
-                    path.display()
-                )
-            }
-            Self::ParseConfig(_) => formatter.write_str("Docker config is not valid JSON"),
-            Self::ParseEnvironmentConfig(_) => {
-                formatter.write_str("DOCKER_AUTH_CONFIG is not valid Docker auth JSON")
-            }
-            Self::EnvironmentNotUnicode => {
-                formatter.write_str("DOCKER_AUTH_CONFIG is not valid Unicode")
-            }
-            Self::InvalidAuth { registry } => {
-                write!(formatter, "Docker auth entry for {registry} is invalid")
-            }
-            Self::InvalidHelperName { helper } => {
-                write!(
-                    formatter,
-                    "Docker credential helper name {helper:?} is invalid"
-                )
-            }
-            Self::RunHelper { program, .. } => {
-                write!(
-                    formatter,
-                    "could not run Docker credential helper {program:?}"
-                )
-            }
-            Self::MissingHelperInput { program } => {
-                write!(
-                    formatter,
-                    "Docker credential helper {program:?} has no input pipe"
-                )
-            }
-            Self::HelperFailed { program, status } => write!(
-                formatter,
-                "Docker credential helper {program:?} failed with {status}"
-            ),
-            Self::InvalidHelperResponse { program, .. } => write!(
-                formatter,
-                "Docker credential helper {program:?} returned invalid JSON"
-            ),
-            Self::MissingHelperUsername { program } => write!(
-                formatter,
-                "Docker credential helper {program:?} returned an empty username"
-            ),
-        }
-    }
+    #[display("Docker credential helper {program:?} returned an empty username")]
+    MissingHelperUsername { program: OsString },
 }
 
 impl Error for DockerCredentialError {
