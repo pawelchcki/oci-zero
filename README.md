@@ -42,6 +42,8 @@ The core APIs use borrowed values, caller-owned buffers, visitors, and
 streaming source/sink traits. They do not require a filesystem, executor, HTTP
 client, or TLS implementation. They can:
 
+- Serve a read-only OCI registry from borrowed memory through a transport-independent
+  router, including catalog/tag pagination, manifests, blobs, and HEAD metadata.
 - Parse references, indexes, manifests, image configs, descriptors, tags,
   annotations, and referrers as lazy borrowed views over caller buffers.
 - Plan read-side OCI Distribution requests, including authentication
@@ -103,6 +105,11 @@ buffer requirements and a usage example.
 - The `reqwless` and `tls` features require Rust 1.91.
 
 ## Examples
+
+[`examples/registry-demo`](examples/registry-demo/) runs an in-memory registry
+locally or as a Cloudflare Worker, using the same `no_std` serving API. Explore
+tiny layered images, a multi-platform index, and repository files packaged as
+an OCI artifact with the web explorer's **Open local demo** button.
 
 These examples run against digest-pinned public registry content.
 

@@ -226,6 +226,10 @@ function initializeUi() {
     event.preventDefault();
     runWithPermissions(() => openCatalog($("registry-input").value, true));
   });
+  $("local-demo").addEventListener("click", () => {
+    $("registry-input").value = "http://127.0.0.1:8787";
+    runWithPermissions(() => openCatalog($("registry-input").value, true));
+  });
   $("permission-button").addEventListener("click", grantPendingPermission);
   $("log-clear").addEventListener("click", () => clear($("log-entries")));
   $("catalog-more").addEventListener("click", () => runWithPermissions(loadMoreCatalog));

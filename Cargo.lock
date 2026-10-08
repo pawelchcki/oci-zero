@@ -1915,6 +1915,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oci-zero-registry-demo"
+version = "0.0.0"
+dependencies = [
+ "oci-zero",
+ "serde_json",
+ "ureq",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "oci-zero-web"
 version = "0.0.1"
 dependencies = [

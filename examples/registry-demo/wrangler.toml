@@ -1,0 +1,12 @@
+name = "oci-zero-demo"
+main = "worker.mjs"
+compatibility_date = "2026-10-08"
+workers_dev = true
+
+[build]
+command = "./build.sh"
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
