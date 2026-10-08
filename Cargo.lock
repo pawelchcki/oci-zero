@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "gzip-zero"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "miniz_oxide 0.9.1",
@@ -1875,7 +1875,7 @@ dependencies = [
 
 [[package]]
 name = "oci-zero"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "embedded-io",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "zstd-zero"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "sha2",
  "ureq",
