@@ -9,6 +9,42 @@ fn decode_all(compressed: &[u8], chunk_size: usize) -> Vec<u8> {
     decode_with_history(compressed, chunk_size, 64 * 1024 * 1024)
 }
 
+#[test]
+fn accepts_custom_offset_alphabets_through_code_31() {
+    // Each custom offset table assigns 31 slots to code 0 and one slot to
+    // code 29, 30 or 31. The sequence selects code 0, so the fixture needs
+    // a small window while exercising the entire table alphabet.
+    for high_symbol in [0x3f, 0x7f, 0xbf] {
+        let frame = [
+            0x28,
+            0xb5,
+            0x2f,
+            0xfd,
+            0,
+            0, // 1 KiB window, no declared content size
+            0x65,
+            0,
+            0, // last compressed block, twelve bytes
+            0x08,
+            b'a', // one raw literal
+            1,
+            0x64,
+            1, // one sequence; RLE LL=1, custom OF, RLE ML
+            0xe0,
+            0xf7,
+            0xff,
+            high_symbol,
+            3, // offset FSE description
+            0,
+            0x20, // ML=3 and offset state 0 with an end marker
+        ];
+        assert_eq!(zstd::bulk::decompress(&frame, 4).unwrap(), b"aaaa");
+        for chunk_size in [1, 2, frame.len()] {
+            assert_eq!(decode_with_history(&frame, chunk_size, 1024), b"aaaa");
+        }
+    }
+}
+
 fn decode_with_history(compressed: &[u8], chunk_size: usize, history_size: usize) -> Vec<u8> {
     let mut buffers = support::Buffers::new(history_size, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
     let mut decoder = Decoder::new(buffers.as_decoder_buffers()).unwrap();
