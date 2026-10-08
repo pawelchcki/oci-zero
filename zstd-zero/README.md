@@ -11,7 +11,7 @@ It requires Rust 1.75 or newer and contains no unsafe code
 
 ```toml
 [dependencies]
-zstd-zero = "0.1"
+zstd-zero = "0.2"
 ```
 
 The caller supplies six reusable buffers:
