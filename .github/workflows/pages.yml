@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - web/**
+      # web/build.sh resolves dependencies through the root workspace lockfile.
+      - Cargo.lock
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -25,8 +27,20 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: wasm-release
+          cache-bin: false
+          cache-directories: ~/.cache/.wasm-pack
+      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+        with:
+          tool: wasm-pack@0.15.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Build WebAssembly package
         run: web/build.sh
       # The flasher inlines esptool-js, so its dependencies have to be present.

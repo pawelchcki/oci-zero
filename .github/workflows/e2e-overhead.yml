@@ -26,6 +26,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
         with:
           toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: oci-zero-v2
+          shared-key: e2e-overhead
+          cache-bin: false
       - name: Install profilers
         run: sudo apt-get update && sudo apt-get install --yes time valgrind
       - name: Run end-to-end harness
