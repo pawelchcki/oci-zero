@@ -100,16 +100,16 @@ impl<'a> Table<'a> {
             if entry.bits == 0 {
                 return Err(DecodeError::InvalidEntropyTable);
             }
-            if strict {
+            let consumed = if strict {
                 // A short read must fail here. Clamping to the bits that remain would
                 // drive `remaining` to exactly 0, making the end-of-stream check below
                 // vacuous, and every remaining literal would then be decoded from an
                 // all-zero peek — silently emitting `entries[0]` instead of erroring.
-                bits.consume(entry.bits)?;
+                entry.bits
             } else {
-                let consumed = core::cmp::min(entry.bits as usize, bits.remaining()) as u8;
-                bits.consume(consumed)?;
-            }
+                core::cmp::min(entry.bits as usize, bits.remaining()) as u8
+            };
+            bits.consume(consumed)?;
             *byte = entry.symbol;
         }
         if bits.remaining() != 0 {
@@ -132,21 +132,12 @@ impl<'a> Table<'a> {
             u16::from_le_bytes([input[2], input[3]]) as usize,
             u16::from_le_bytes([input[4], input[5]]) as usize,
         ];
-        let starts = [
-            6,
-            6usize
-                .checked_add(sizes[0])
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-            6usize
-                .checked_add(sizes[0])
-                .and_then(|value| value.checked_add(sizes[1]))
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-            6usize
-                .checked_add(sizes[0])
-                .and_then(|value| value.checked_add(sizes[1]))
-                .and_then(|value| value.checked_add(sizes[2]))
-                .ok_or(DecodeError::ArithmeticOverflow)?,
-        ];
+        let mut starts = [6usize; 4];
+        for (stream, size) in sizes.iter().enumerate() {
+            starts[stream + 1] = starts[stream]
+                .checked_add(*size)
+                .ok_or(DecodeError::ArithmeticOverflow)?;
+        }
         if starts[3] > input.len() {
             return Err(DecodeError::InvalidBitstream);
         }
@@ -275,21 +266,7 @@ fn decode_compressed_weights(
             return Ok(count + 1);
         }
         table.update(&mut first, &mut bits)?;
-
-        if count >= 255 {
-            return Err(DecodeError::InvalidEntropyTable);
-        }
-        output[count] = table.symbol(second)?;
-        count += 1;
-        let entry = table.entry(second)?;
-        if bits.remaining() < entry.bits as usize {
-            if count >= 255 {
-                return Err(DecodeError::InvalidEntropyTable);
-            }
-            output[count] = table.symbol(first)?;
-            return Ok(count + 1);
-        }
-        table.update(&mut second, &mut bits)?;
+        core::mem::swap(&mut first, &mut second);
     }
 }
 

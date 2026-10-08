@@ -6,7 +6,9 @@
 //! stricter than libzstd (rejecting streams libzstd tolerates), but whenever it
 //! accepts a frame the output must be byte-identical to libzstd's.
 
-use zstd_zero::{DecodeStep, Decoder, DecoderBuffers, DecoderOptions, MAX_BLOCK_SIZE};
+mod support;
+
+use zstd_zero::{Decoder, DecoderOptions, MAX_BLOCK_SIZE};
 
 /// Decode a complete stream. `Ok` only if the decoder accepted it cleanly.
 fn decode_zero(compressed: &[u8], history_size: usize) -> Result<Vec<u8>, String> {
@@ -18,52 +20,19 @@ fn decode_with(
     history_size: usize,
     options: DecoderOptions,
 ) -> Result<Vec<u8>, String> {
-    let mut history = vec![0u8; history_size];
-    let mut block = vec![0u8; MAX_BLOCK_SIZE];
-    let mut literals = vec![0u8; MAX_BLOCK_SIZE];
-    let mut fse_scratch = [0i16; zstd_zero::FSE_SCRATCH_LEN];
-    let mut fse = vec![zstd_zero::FseEntry::default(); zstd_zero::FSE_ENTRIES];
-    let mut huffman = vec![zstd_zero::HuffmanEntry::default(); zstd_zero::HUFFMAN_ENTRIES];
-    let mut decoder = Decoder::with_options(
-        DecoderBuffers {
-            history: &mut history,
-            block: &mut block,
-            literals: &mut literals,
-            fse_scratch: &mut fse_scratch,
-            fse: &mut fse,
-            huffman: &mut huffman,
-        },
-        options,
-    )
-    .unwrap();
+    let mut buffers = support::Buffers::new(history_size, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
+    let mut decoder = Decoder::with_options(buffers.as_decoder_buffers(), options).unwrap();
     let mut out = Vec::new();
-    let mut input = compressed;
-    let mut finished = 0usize;
-    loop {
-        let step = decoder
-            .decode(input)
-            .map_err(|error| format!("{error:?}"))?;
-        let consumed = step.consumed();
-        if consumed > input.len() {
-            return Err("consumed more than was available".into());
-        }
-        if let DecodeStep::Output { bytes, .. } = &step {
-            out.extend_from_slice(bytes);
-        }
-        if matches!(step, DecodeStep::FrameFinished { .. }) {
-            finished += 1;
-        }
-        input = &input[consumed..];
-        if matches!(step, DecodeStep::NeedInput { .. }) {
-            if !input.is_empty() {
-                return Err("stalled without consuming its input".into());
-            }
-            break;
-        }
-    }
-    if finished == 0 {
-        return Err("no frame finished".into());
-    }
+    let mut collect = |bytes: &[u8]| {
+        out.extend_from_slice(bytes);
+        Ok::<_, core::convert::Infallible>(())
+    };
+    decoder
+        .push(compressed, &mut collect)
+        .map_err(|error| format!("{error:?}"))?;
+    decoder
+        .finish_with(collect)
+        .map_err(|error| format!("{error:?}"))?;
     Ok(out)
 }
 
