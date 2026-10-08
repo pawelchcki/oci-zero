@@ -13,7 +13,7 @@ fn handle(mut stream: TcpStream) -> io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut input = [0u8; 8192];
     let mut len = 0;
-    loop {
+    let header_length = loop {
         if len == input.len() {
             stream.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
             return Ok(());
@@ -23,11 +23,15 @@ fn handle(mut stream: TcpStream) -> io::Result<()> {
             return Ok(());
         }
         len += read;
-        if input[..len].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-            break;
+        if let Some(end) = input[..len]
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+        {
+            break end + 4;
         }
-    }
-    let request = std::str::from_utf8(&input[..len]).map_err(|_| io::ErrorKind::InvalidData)?;
+    };
+    let request =
+        std::str::from_utf8(&input[..header_length]).map_err(|_| io::ErrorKind::InvalidData)?;
     let mut lines = request.split("\r\n");
     let mut start = lines.next().unwrap_or("").split_whitespace();
     let method = start.next().ok_or(io::ErrorKind::InvalidData)?;

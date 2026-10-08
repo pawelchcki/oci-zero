@@ -103,7 +103,6 @@ fn bounds_listing_output_and_rejects_malformed_pagination() {
         Err(BufferTooSmall)
     ));
     for query in [
-        "n=0",
         "n=-1",
         "n=+1",
         "n=wat",
@@ -180,4 +179,69 @@ fn supports_probe_and_preflight_and_rejects_writes() {
             405
         );
     }
+}
+
+#[test]
+fn selects_the_terminal_operation_when_repository_components_are_endpoint_names() {
+    let manifest = Content::new(b"{}", "application/vnd.oci.image.manifest.v1+json");
+    let blob = Content::new(b"hello", "text/plain");
+    let tags = [Tag {
+        name: "latest",
+        digest: manifest.digest,
+    }];
+    let manifests = [manifest];
+    let blobs = [blob];
+    let repositories =
+        ["team/manifests/app", "team/blobs/app", "team/tags/list"].map(|name| Repository {
+            name,
+            tags: &tags,
+            manifests: &manifests,
+            blobs: &blobs,
+        });
+    let store = MemoryStore(&repositories);
+    let mut scratch = [0; 256];
+    for repository in repositories {
+        let path = format!("/v2/{}/blobs/{}", repository.name, blob.digest);
+        assert_eq!(
+            serve(&store, "GET", &path, &mut scratch).unwrap().body,
+            b"hello"
+        );
+        let path = format!("/v2/{}/manifests/latest", repository.name);
+        assert_eq!(
+            serve(&store, "GET", &path, &mut scratch).unwrap().body,
+            b"{}"
+        );
+        let path = format!("/v2/{}/tags/list", repository.name);
+        assert_eq!(
+            serve(&store, "GET", &path, &mut scratch).unwrap().status,
+            200
+        );
+    }
+}
+
+#[test]
+fn zero_page_size_returns_an_empty_listing_without_a_link() {
+    let tags = [Tag {
+        name: "latest",
+        digest: Digest::from_bytes([0; 32]),
+    }];
+    let store = MemoryStore(&[Repository {
+        name: "demo",
+        tags: &tags,
+        manifests: &[],
+        blobs: &[],
+    }]);
+    let mut scratch = [0; 256];
+    for path in [
+        "/v2/demo/tags/list?n=0",
+        "/v2/demo/tags/list?n=0&last=latest",
+    ] {
+        let result = serve(&store, "GET", path, &mut scratch).unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body, br#"{"name":"demo","tags":[]}"#);
+        assert!(result.next.is_none());
+    }
+    let result = serve(&store, "GET", "/v2/_catalog?n=0", &mut scratch).unwrap();
+    assert_eq!(result.body, br#"{"repositories":[]}"#);
+    assert!(result.next.is_none());
 }

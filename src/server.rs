@@ -153,7 +153,8 @@ impl fmt::Display for BufferTooSmall {
 }
 
 /// Serve GET/HEAD and OPTIONS from a read-only registry. Pagination accepts
-/// positive `n` and a percent-encoded `last` cursor (maximum 256 decoded bytes).
+/// nonnegative `n` and a percent-encoded `last` cursor (maximum 256 decoded bytes).
+/// `n=0` returns an empty page without a continuation link.
 /// Unknown query parameters are ignored. Malformed known parameters return 400.
 /// Listings are lexically sorted even if the store's names are unsorted.
 pub fn serve<'a>(
@@ -214,6 +215,9 @@ pub fn serve<'a>(
         let mut emitted = None;
         let mut next = None;
         loop {
+            if n == 0 {
+                break;
+            }
             // Selection avoids allocation and imposes no sorting requirement on
             // small embedded stores. Large stores can implement indexed access.
             let mut smallest = None;
@@ -247,7 +251,13 @@ pub fn serve<'a>(
         result.next = next;
         return Ok(result);
     }
-    if let Some((repo, reference)) = rest.rsplit_once("/manifests/") {
+    let Some((prefix, reference)) = rest.rsplit_once('/') else {
+        return Ok(error(404, "NAME_UNKNOWN", head));
+    };
+    let Some((repo, operation)) = prefix.rsplit_once('/') else {
+        return Ok(error(404, "NAME_UNKNOWN", head));
+    };
+    if operation == "manifests" {
         if !store.contains_repository(repo) {
             return Ok(error(404, "NAME_UNKNOWN", head));
         }
@@ -262,11 +272,11 @@ pub fn serve<'a>(
             None => error(404, "MANIFEST_UNKNOWN", head),
         });
     }
-    if let Some((repo, encoded)) = rest.rsplit_once("/blobs/") {
+    if operation == "blobs" {
         if !store.contains_repository(repo) {
             return Ok(error(404, "NAME_UNKNOWN", head));
         }
-        let Ok(digest) = Digest::parse(encoded) else {
+        let Ok(digest) = Digest::parse(reference) else {
             return Ok(error(400, "DIGEST_INVALID", head));
         };
         return Ok(match store.blob(repo, digest) {
@@ -327,9 +337,6 @@ fn pagination<'a>(query: &str, cursor: &'a mut [u8]) -> Option<(usize, &'a str)>
                 }
                 seen_n = true;
                 n = value.parse().ok()?;
-                if n == 0 {
-                    return None;
-                }
             }
             "last" => {
                 if seen_last {

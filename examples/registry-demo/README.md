@@ -31,7 +31,7 @@ transport for larger or public servers.
 ## Run or deploy the Cloudflare Worker
 
 Install [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node.js
-20.19+ (CI uses Node 24), then:
+22+ (CI uses Node 24), then:
 
 ```sh
 cd examples/registry-demo

@@ -21,7 +21,7 @@ assert.deepEqual(await probe.json(), {});
 const preflight = await get("/v2/demo/garden/tags/list", { method: "OPTIONS", headers: { "Access-Control-Request-Method": "GET" } });
 assert.equal(preflight.status, 204);
 assert.equal(await preflight.text(), "");
-assert.equal((await get("/v2/", { method: "PUT" })).status, 405);
+assert.equal((await get("/v2/", { method: "PUT", body: new Uint8Array([255, 254, 0, 128]) })).status, 405);
 
 async function pages(path, key) {
   const names = [];
@@ -40,6 +40,10 @@ async function pages(path, key) {
 
 assert.deepEqual(await pages("/v2/_catalog?n=1", "repositories"), ["demo/garden", "demo/source"]);
 assert.deepEqual(await pages("/v2/demo/garden/tags/list?n=1", "tags"), ["latest", "multi", "v1", "v2"]);
+const zero = await get("/v2/demo/garden/tags/list?n=0");
+assert.equal(zero.status, 200);
+assert.deepEqual(await zero.json(), { name: "demo/garden", tags: [] });
+assert.equal(zero.headers.get("Link"), null);
 
 async function payload(repo, kind, reference, descriptor) {
   const path = `/v2/${repo}/${kind}/${reference}`;
